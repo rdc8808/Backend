@@ -73,7 +73,7 @@ app.get('/auth/linkedin', (req, res) => {
     `response_type=code` +
     `&client_id=${CONFIG.LINKEDIN_CLIENT_ID}` +
     `&redirect_uri=${encodeURIComponent(CONFIG.REDIRECT_URI)}` +
-    `&scope=w_member_social,r_liteprofile` +
+    `&scope=profile,email,w_member_social` +
     `&state=linkedin_${userId}`;
   
   res.redirect(authUrl);
