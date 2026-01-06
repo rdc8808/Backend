@@ -73,7 +73,7 @@ app.get('/auth/linkedin', (req, res) => {
     `response_type=code` +
     `&client_id=${CONFIG.LINKEDIN_CLIENT_ID}` +
     `&redirect_uri=${encodeURIComponent(CONFIG.REDIRECT_URI)}` +
-    `&scope=profile,email,w_member_social` +
+    `&scope=w_member_social,r_liteprofile` +
     `&state=linkedin_${userId}`;
   
   res.redirect(authUrl);
@@ -369,14 +369,18 @@ cron.schedule('* * * * *', async () => {
   // Runs every minute
   try {
     const db = await readDB();
+    
+    // Get current time in Lima, Peru timezone (UTC-5)
     const now = new Date();
+    const limaTime = new Date(now.toLocaleString('en-US', { timeZone: 'America/Lima' }));
     
     for (const post of db.posts) {
       if (post.status !== 'scheduled') continue;
       
-      const scheduledTime = new Date(`${post.scheduleDate}T${post.scheduleTime}`);
+      // Parse the scheduled time in Lima timezone
+      const scheduledDateTime = new Date(`${post.scheduleDate}T${post.scheduleTime}`);
       
-      if (scheduledTime <= now) {
+      if (scheduledDateTime <= limaTime) {
         console.log(`Publishing scheduled post: ${post.id}`);
         
         try {
@@ -392,7 +396,7 @@ cron.schedule('* * * * *', async () => {
           
           // Update post status
           post.status = 'published';
-          post.publishedAt = now.toISOString();
+          post.publishedAt = limaTime.toISOString();
           post.results = results;
           
           await writeDB(db);
