@@ -634,6 +634,42 @@ app.post('/api/disconnect', async (req, res) => {
   }
 });
 
+// ============ ADMIN: Reset User Password ============
+app.post('/api/admin/reset-password', async (req, res) => {
+  try {
+    const { email, newPassword, adminKey } = req.body;
+
+    // Simple admin authentication - in production use proper auth
+    if (adminKey !== 'rubicon2026admin') {
+      return res.status(403).json({ error: 'Acceso denegado' });
+    }
+
+    if (!email || !newPassword) {
+      return res.status(400).json({ error: 'Email y nueva contraseña son requeridos' });
+    }
+
+    const db = await readDB();
+    const user = db.users[email];
+
+    if (!user) {
+      return res.status(404).json({ error: 'Usuario no encontrado' });
+    }
+
+    // Reset password
+    db.users[email].password = newPassword;
+    await writeDB(db);
+
+    res.json({
+      success: true,
+      message: `Contraseña actualizada para ${email}`,
+      newPassword: newPassword
+    });
+  } catch (error) {
+    console.error('Password reset error:', error);
+    res.status(500).json({ error: 'Error al resetear contraseña' });
+  }
+});
+
 // ============ DEBUG ENDPOINT - Check all users ============
 app.get('/api/debug/users', async (req, res) => {
   try {
@@ -647,6 +683,28 @@ app.get('/api/debug/users', async (req, res) => {
     res.json({
       totalUsers: userList.length,
       users: userList
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ DEBUG ENDPOINT - Get user with password ============
+app.get('/api/debug/user/:email', async (req, res) => {
+  try {
+    const email = req.params.email;
+    const db = await readDB();
+    const user = db.users[email];
+
+    if (!user) {
+      return res.status(404).json({ error: 'Usuario no encontrado' });
+    }
+
+    res.json({
+      email: user.email,
+      fullName: user.fullName,
+      password: user.password,
+      createdAt: user.createdAt
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
