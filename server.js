@@ -231,12 +231,17 @@ async function postToFacebook(userId, postData) {
   }
 
   // Text-only post
-  const response = await axios.post(
-    `https://graph.facebook.com/v18.0/${pageId}/feed`,
-    postParams
-  );
-
-  return response.data;
+  try {
+    const response = await axios.post(
+      `https://graph.facebook.com/v18.0/${pageId}/feed`,
+      postParams
+    );
+    return response.data;
+  } catch (error) {
+    // Log detailed error for debugging
+    console.error('Facebook API Error:', error.response?.data || error.message);
+    throw new Error(`Facebook API error: ${error.response?.data?.error?.message || error.message}`);
+  }
 }
 
 // ============ POST TO LINKEDIN ============
