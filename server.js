@@ -103,32 +103,40 @@ app.get('/auth/callback', async (req, res) => {
         params: { access_token: accessToken }
       });
 
+      console.log('Facebook pages response:', pagesResponse.data);
+
       // Save tokens
       const db = await readDB();
       if (!db.tokens[userId]) db.tokens[userId] = {};
       db.tokens[userId].facebook = {
         accessToken: accessToken,
-        pages: pagesResponse.data.data,
+        pages: pagesResponse.data.data || [],
         connectedAt: new Date().toISOString()
       };
       await writeDB(db);
 
+      console.log('Saved Facebook tokens for user:', userId, 'Pages count:', db.tokens[userId].facebook.pages.length);
+
     } else if (platform === 'linkedin') {
       // Exchange code for access token
-      const tokenResponse = await axios.post(`https://www.linkedin.com/oauth/v2/accessToken`, null, {
-        params: {
+      const tokenResponse = await axios.post(`https://www.linkedin.com/oauth/v2/accessToken`,
+        new URLSearchParams({
           grant_type: 'authorization_code',
           code: code,
           redirect_uri: CONFIG.REDIRECT_URI,
           client_id: CONFIG.LINKEDIN_CLIENT_ID,
           client_secret: CONFIG.LINKEDIN_CLIENT_SECRET
+        }), {
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded'
+          }
         }
-      });
+      );
 
       const accessToken = tokenResponse.data.access_token;
 
-      // Get user profile
-      const profileResponse = await axios.get(`https://api.linkedin.com/v2/me`, {
+      // Get user profile using OpenID Connect
+      const profileResponse = await axios.get(`https://api.linkedin.com/v2/userinfo`, {
         headers: { Authorization: `Bearer ${accessToken}` }
       });
 
@@ -202,10 +210,11 @@ async function postToFacebook(userId, postData) {
 async function postToLinkedIn(userId, postData) {
   const db = await readDB();
   const liToken = db.tokens[userId]?.linkedin;
-  
+
   if (!liToken) throw new Error('LinkedIn not connected');
 
-  const personURN = `urn:li:person:${liToken.profile.id}`;
+  // Use 'sub' field from OpenID Connect userinfo response
+  const personURN = `urn:li:person:${liToken.profile.sub}`;
 
   const postBody = {
     author: personURN,
@@ -415,11 +424,56 @@ app.get('/api/connections', async (req, res) => {
     const userId = req.query.userId || 'default_user';
     const db = await readDB();
     const tokens = db.tokens[userId] || {};
-    
+
     res.json({
       facebook: !!tokens.facebook,
       linkedin: !!tokens.linkedin,
       instagram: false // We'll add this later if needed
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ DISCONNECT ACCOUNT ============
+app.post('/api/disconnect', async (req, res) => {
+  try {
+    const { userId, platform } = req.body;
+    const db = await readDB();
+
+    if (!db.tokens[userId]) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (platform === 'facebook' && db.tokens[userId].facebook) {
+      delete db.tokens[userId].facebook;
+    } else if (platform === 'linkedin' && db.tokens[userId].linkedin) {
+      delete db.tokens[userId].linkedin;
+    }
+
+    await writeDB(db);
+    res.json({ success: true, message: `${platform} disconnected successfully` });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ DEBUG ENDPOINT - Check stored tokens ============
+app.get('/api/debug/tokens/:userId', async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    const db = await readDB();
+    const tokens = db.tokens[userId] || {};
+
+    res.json({
+      userId,
+      hasFacebook: !!tokens.facebook,
+      facebookPages: tokens.facebook?.pages?.length || 0,
+      hasLinkedIn: !!tokens.linkedin,
+      linkedInProfile: tokens.linkedin?.profile ? {
+        sub: tokens.linkedin.profile.sub,
+        name: tokens.linkedin.profile.name
+      } : null
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
