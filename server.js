@@ -634,6 +634,25 @@ app.post('/api/disconnect', async (req, res) => {
   }
 });
 
+// ============ DEBUG ENDPOINT - Check all users ============
+app.get('/api/debug/users', async (req, res) => {
+  try {
+    const db = await readDB();
+    const userList = Object.values(db.users).map(u => ({
+      email: u.email,
+      fullName: u.fullName,
+      createdAt: u.createdAt
+    }));
+
+    res.json({
+      totalUsers: userList.length,
+      users: userList
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ============ DEBUG ENDPOINT - Check stored tokens ============
 app.get('/api/debug/tokens/:userId', async (req, res) => {
   try {
