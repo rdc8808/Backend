@@ -15,6 +15,27 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
+// Root endpoint for Facebook verification
+app.get('/', (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <title>Rubicon Core - Social Planner API</title>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      </head>
+      <body style="font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px;">
+        <h1 style="color: #0050cb;">Rubicon Core Social Planner API</h1>
+        <p>This is the backend API for Core Business Corp's social media scheduling platform.</p>
+        <p style="color: #666;">Status: <strong style="color: #22c55e;">Active</strong></p>
+        <hr style="margin: 30px 0; border: none; border-top: 1px solid #e5e7eb;">
+        <p style="font-size: 14px; color: #888;">© ${new Date().getFullYear()} Core Business Corp. All rights reserved.</p>
+      </body>
+    </html>
+  `);
+});
+
 // Storage setup
 const upload = multer({ dest: 'uploads/' });
 
