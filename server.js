@@ -73,9 +73,9 @@ app.get('/auth/linkedin', (req, res) => {
     `response_type=code` +
     `&client_id=${CONFIG.LINKEDIN_CLIENT_ID}` +
     `&redirect_uri=${encodeURIComponent(CONFIG.REDIRECT_URI)}` +
-    `&scope=w_member_social,r_liteprofile` +
+    `&scope=openid,profile,w_member_social,email` +
     `&state=linkedin_${userId}`;
-  
+
   res.redirect(authUrl);
 });
 
@@ -154,8 +154,11 @@ app.get('/auth/callback', async (req, res) => {
 async function postToFacebook(userId, postData) {
   const db = await readDB();
   const fbToken = db.tokens[userId]?.facebook;
-  
+
   if (!fbToken) throw new Error('Facebook not connected');
+  if (!fbToken.pages || fbToken.pages.length === 0) {
+    throw new Error('No Facebook pages found. Please reconnect your Facebook account.');
+  }
 
   const pageToken = fbToken.pages[0].access_token; // Use first page
   const pageId = fbToken.pages[0].id;
