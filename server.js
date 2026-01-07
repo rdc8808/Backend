@@ -216,18 +216,27 @@ async function postToFacebook(userId, postData) {
     await fs.writeFile(tempFile, mediaBuffer);
 
     const form = new FormData();
-    form.append('source', await fs.readFile(tempFile));
+    form.append('source', (await fs.readFile(tempFile)), {
+      filename: 'image.jpg',
+      contentType: 'image/jpeg'
+    });
     form.append('access_token', pageToken);
     form.append('message', postData.caption);
 
-    const uploadResponse = await axios.post(
-      `https://graph.facebook.com/v18.0/${pageId}/photos`,
-      form,
-      { headers: form.getHeaders() }
-    );
+    try {
+      const uploadResponse = await axios.post(
+        `https://graph.facebook.com/v18.0/${pageId}/photos`,
+        form,
+        { headers: form.getHeaders() }
+      );
 
-    await fs.unlink(tempFile);
-    return uploadResponse.data;
+      await fs.unlink(tempFile);
+      return uploadResponse.data;
+    } catch (error) {
+      await fs.unlink(tempFile).catch(() => {}); // Clean up file even on error
+      console.error('Facebook photo upload error:', JSON.stringify(error.response?.data, null, 2));
+      throw new Error(`Facebook photo upload failed: ${error.response?.data?.error?.message || error.message}`);
+    }
   }
 
   // Text-only post
