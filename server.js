@@ -278,23 +278,61 @@ async function postToLinkedIn(userId, postData) {
   return response.data;
 }
 
+// ============ SAVE DRAFT ============
+app.post('/api/drafts', async (req, res) => {
+  try {
+    const { userId, postData } = req.body;
+    const db = await readDB();
+
+    const post = {
+      id: postData.id || Date.now().toString(),
+      userId: userId || 'default_user',
+      ...postData,
+      status: 'draft',
+      createdAt: postData.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    // Update if exists, otherwise add
+    const index = db.posts.findIndex(p => p.id === post.id);
+    if (index !== -1) {
+      db.posts[index] = post;
+    } else {
+      db.posts.push(post);
+    }
+
+    await writeDB(db);
+    res.json({ success: true, post });
+  } catch (error) {
+    console.error('Draft error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ============ SCHEDULE POST ============
 app.post('/api/schedule', async (req, res) => {
   try {
     const { userId, postData } = req.body;
     const db = await readDB();
-    
+
     const post = {
-      id: Date.now().toString(),
+      id: postData.id || Date.now().toString(),
       userId: userId || 'default_user',
       ...postData,
       status: 'scheduled',
-      createdAt: new Date().toISOString()
+      createdAt: postData.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString()
     };
 
-    db.posts.push(post);
-    await writeDB(db);
+    // Update if exists, otherwise add
+    const index = db.posts.findIndex(p => p.id === post.id);
+    if (index !== -1) {
+      db.posts[index] = post;
+    } else {
+      db.posts.push(post);
+    }
 
+    await writeDB(db);
     res.json({ success: true, post });
   } catch (error) {
     console.error('Schedule error:', error);
@@ -316,7 +354,28 @@ app.post('/api/post-now', async (req, res) => {
       results.linkedin = await postToLinkedIn(userId || 'default_user', postData);
     }
 
-    res.json({ success: true, results });
+    // Save to database as published
+    const db = await readDB();
+    const post = {
+      id: postData.id || Date.now().toString(),
+      userId: userId || 'default_user',
+      ...postData,
+      status: 'published',
+      publishedAt: new Date().toISOString(),
+      results: results
+    };
+
+    // Update if exists, otherwise add
+    const index = db.posts.findIndex(p => p.id === post.id);
+    if (index !== -1) {
+      db.posts[index] = post;
+    } else {
+      db.posts.push(post);
+    }
+
+    await writeDB(db);
+
+    res.json({ success: true, results, post });
   } catch (error) {
     console.error('Post error:', error);
     res.status(500).json({ error: error.message });
