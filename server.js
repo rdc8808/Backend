@@ -29,11 +29,23 @@ app.get('/', (req, res) => {
         <h1 style="color: #0050cb;">Rubicon Core Social Planner API</h1>
         <p>This is the backend API for Core Business Corp's social media scheduling platform.</p>
         <p style="color: #666;">Status: <strong style="color: #22c55e;">Active</strong></p>
-        <hr style="margin: 30px 0; border: none; border-top: 1px solid #e5e7eb;">
-        <p style="font-size: 14px; color: #888;">© ${new Date().getFullYear()} Core Business Corp. All rights reserved.</p>
       </body>
     </html>
   `);
+});
+
+// robots.txt to allow Facebook crawler
+app.get('/robots.txt', (req, res) => {
+  res.type('text/plain');
+  res.send(`User-agent: Facebookbot
+Allow: /
+
+User-agent: facebookexternalhit
+Allow: /
+
+User-agent: *
+Allow: /
+`);
 });
 
 // Storage setup
