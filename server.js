@@ -238,9 +238,19 @@ async function postToFacebook(userId, postData) {
     );
     return response.data;
   } catch (error) {
-    // Log detailed error for debugging
-    console.error('Facebook API Error:', error.response?.data || error.message);
-    throw new Error(`Facebook API error: ${error.response?.data?.error?.message || error.message}`);
+    // Log FULL detailed error for debugging
+    console.error('Facebook API Error - Full Details:');
+    console.error('Status:', error.response?.status);
+    console.error('Error Data:', JSON.stringify(error.response?.data, null, 2));
+    console.error('Page ID:', pageId);
+    console.error('Has Page Token:', !!pageToken);
+
+    const fbError = error.response?.data?.error;
+    const errorMessage = fbError?.message || error.message;
+    const errorCode = fbError?.code;
+    const errorType = fbError?.type;
+
+    throw new Error(`Facebook API error (${errorCode} - ${errorType}): ${errorMessage}`);
   }
 }
 
