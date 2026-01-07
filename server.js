@@ -303,10 +303,10 @@ app.get('/auth/callback', async (req, res) => {
       await writeDB(db);
     }
 
-    res.json({ success: true, platform });
+    res.redirect(`${CONFIG.CLIENT_URL}?connected=${platform}`);
   } catch (error) {
     console.error('OAuth error:', error.response?.data || error.message);
-    res.status(500).json({ error: 'auth_failed', message: error.message });
+    res.redirect(`${CONFIG.CLIENT_URL}?error=auth_failed`);
   }
 });
 
