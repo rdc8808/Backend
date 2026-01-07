@@ -99,6 +99,125 @@ app.get('/auth/facebook', (req, res) => {
   res.redirect(authUrl);
 });
 
+// ============ USER REGISTRATION ============
+app.post('/api/register', async (req, res) => {
+  try {
+    const { fullName, email, password } = req.body;
+
+    // Validate required fields
+    if (!fullName || !email || !password) {
+      return res.status(400).json({ error: 'Todos los campos son requeridos' });
+    }
+
+    // Validate corporate email
+    const allowedDomains = ['@corebusinesscorp.com', '@rubicondigitalcorp.com'];
+    const emailDomain = email.substring(email.indexOf('@'));
+    if (!allowedDomains.includes(emailDomain)) {
+      return res.status(400).json({ error: 'Solo se permiten correos corporativos' });
+    }
+
+    const db = await readDB();
+
+    // Check if user already exists
+    if (db.users[email]) {
+      return res.status(400).json({ error: 'El correo electrónico ya existe' });
+    }
+
+    // Create user
+    db.users[email] = {
+      fullName,
+      email,
+      password, // In production, hash this with bcrypt!
+      createdAt: new Date().toISOString()
+    };
+
+    await writeDB(db);
+
+    res.json({
+      success: true,
+      user: {
+        fullName,
+        email
+      }
+    });
+  } catch (error) {
+    console.error('Registration error:', error);
+    res.status(500).json({ error: 'Error al registrar usuario' });
+  }
+});
+
+// ============ USER LOGIN ============
+app.post('/api/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email y contraseña son requeridos' });
+    }
+
+    const db = await readDB();
+    const user = db.users[email];
+
+    if (!user || user.password !== password) {
+      return res.status(401).json({ error: 'Credenciales inválidas' });
+    }
+
+    res.json({
+      success: true,
+      user: {
+        fullName: user.fullName,
+        email: user.email,
+        password: user.password
+      }
+    });
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({ error: 'Error al iniciar sesión' });
+  }
+});
+
+// ============ UPDATE PASSWORD ============
+app.post('/api/update-password', async (req, res) => {
+  try {
+    const { email, currentPassword, newPassword } = req.body;
+
+    if (!email || !currentPassword || !newPassword) {
+      return res.status(400).json({ error: 'Todos los campos son requeridos' });
+    }
+
+    const db = await readDB();
+    const user = db.users[email];
+
+    if (!user) {
+      return res.status(404).json({ error: 'Usuario no encontrado' });
+    }
+
+    if (user.password !== currentPassword) {
+      return res.status(401).json({ error: 'Contraseña actual incorrecta' });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({ error: 'La nueva contraseña debe tener al menos 6 caracteres' });
+    }
+
+    // Update password
+    db.users[email].password = newPassword;
+    await writeDB(db);
+
+    res.json({
+      success: true,
+      user: {
+        fullName: user.fullName,
+        email: user.email,
+        password: newPassword
+      }
+    });
+  } catch (error) {
+    console.error('Password update error:', error);
+    res.status(500).json({ error: 'Error al actualizar contraseña' });
+  }
+});
+
 // ============ LINKEDIN OAUTH ============
 app.get('/auth/linkedin', (req, res) => {
   const userId = req.query.userId || 'default_user';
