@@ -93,7 +93,7 @@ app.get('/auth/facebook', (req, res) => {
   const authUrl = `https://www.facebook.com/v18.0/dialog/oauth?` +
     `client_id=${CONFIG.FACEBOOK_APP_ID}` +
     `&redirect_uri=${encodeURIComponent(CONFIG.REDIRECT_URI)}` +
-    `&scope=pages_manage_posts,pages_read_engagement,pages_show_list` +
+    `&scope=pages_manage_posts,pages_read_engagement,pages_show_list,publish_video` +
     `&state=facebook_${userId}`;
   
   res.redirect(authUrl);
@@ -331,30 +331,41 @@ async function postToFacebook(userId, postData) {
   // Upload media if exists
   if (postData.media) {
     const mediaBuffer = Buffer.from(postData.media.split(',')[1], 'base64');
-    const tempFile = path.join('uploads', `temp_${Date.now()}.jpg`);
+
+    // Detect media type from base64 header
+    const mediaType = postData.media.split(';')[0].split(':')[1];
+    const isVideo = mediaType.startsWith('video/');
+    const extension = isVideo ? 'mp4' : 'jpg';
+    const tempFile = path.join('uploads', `temp_${Date.now()}.${extension}`);
+
     await fs.writeFile(tempFile, mediaBuffer);
 
     const form = new FormData();
     form.append('source', (await fs.readFile(tempFile)), {
-      filename: 'image.jpg',
-      contentType: 'image/jpeg'
+      filename: `media.${extension}`,
+      contentType: mediaType
     });
     form.append('access_token', pageToken);
-    form.append('message', postData.caption);
+    form.append(isVideo ? 'description' : 'message', postData.caption);
 
     try {
+      const endpoint = isVideo ? 'videos' : 'photos';
       const uploadResponse = await axios.post(
-        `https://graph.facebook.com/v18.0/${pageId}/photos`,
+        `https://graph.facebook.com/v18.0/${pageId}/${endpoint}`,
         form,
-        { headers: form.getHeaders() }
+        {
+          headers: form.getHeaders(),
+          maxContentLength: Infinity,
+          maxBodyLength: Infinity
+        }
       );
 
       await fs.unlink(tempFile);
       return uploadResponse.data;
     } catch (error) {
       await fs.unlink(tempFile).catch(() => {}); // Clean up file even on error
-      console.error('Facebook photo upload error:', JSON.stringify(error.response?.data, null, 2));
-      throw new Error(`Facebook photo upload failed: ${error.response?.data?.error?.message || error.message}`);
+      console.error(`Facebook ${isVideo ? 'video' : 'photo'} upload error:`, JSON.stringify(error.response?.data, null, 2));
+      throw new Error(`Facebook ${isVideo ? 'video' : 'photo'} upload failed: ${error.response?.data?.error?.message || error.message}`);
     }
   }
 
@@ -392,6 +403,17 @@ async function postToLinkedIn(userId, postData) {
   // Use 'sub' field from OpenID Connect userinfo response
   const personURN = `urn:li:person:${liToken.profile.sub}`;
 
+  // Detect media type
+  let mediaCategory = 'NONE';
+  let recipe = null;
+
+  if (postData.media) {
+    const mediaType = postData.media.split(';')[0].split(':')[1];
+    const isVideo = mediaType.startsWith('video/');
+    mediaCategory = isVideo ? 'VIDEO' : 'IMAGE';
+    recipe = isVideo ? 'urn:li:digitalmediaRecipe:feedshare-video' : 'urn:li:digitalmediaRecipe:feedshare-image';
+  }
+
   const postBody = {
     author: personURN,
     lifecycleState: 'PUBLISHED',
@@ -400,7 +422,7 @@ async function postToLinkedIn(userId, postData) {
         shareCommentary: {
           text: postData.caption
         },
-        shareMediaCategory: postData.media ? 'IMAGE' : 'NONE'
+        shareMediaCategory: mediaCategory
       }
     },
     visibility: {
@@ -411,13 +433,13 @@ async function postToLinkedIn(userId, postData) {
   // If there's media, upload it first
   if (postData.media) {
     const mediaBuffer = Buffer.from(postData.media.split(',')[1], 'base64');
-    
+
     // Register upload
     const registerResponse = await axios.post(
       'https://api.linkedin.com/v2/assets?action=registerUpload',
       {
         registerUploadRequest: {
-          recipes: ['urn:li:digitalmediaRecipe:feedshare-image'],
+          recipes: [recipe],
           owner: personURN,
           serviceRelationships: [{
             relationshipType: 'OWNER',
@@ -441,7 +463,9 @@ async function postToLinkedIn(userId, postData) {
       headers: {
         Authorization: `Bearer ${liToken.accessToken}`,
         'Content-Type': 'application/octet-stream'
-      }
+      },
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity
     });
 
     // Add media to post
