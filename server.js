@@ -53,18 +53,29 @@ Allow: /
 const upload = multer({ dest: 'uploads/' });
 
 // Database file (using JSON for simplicity - use real DB in production)
-const DB_FILE = 'database.json';
+// Use persistent path on Render, local path in development
+const DB_FILE = process.env.NODE_ENV === 'production'
+  ? '/opt/render/project/data/database.json'
+  : path.join(__dirname, 'database.json');
 
 // Initialize database
 async function initDB() {
   try {
+    // Ensure data directory exists (for Render)
+    const dbDir = path.dirname(DB_FILE);
+    await fs.mkdir(dbDir, { recursive: true });
+
+    // Check if database file exists
     await fs.access(DB_FILE);
+    console.log(`✓ Database file found at: ${DB_FILE}`);
   } catch {
+    // Create new database file
     await fs.writeFile(DB_FILE, JSON.stringify({
       users: {},
       posts: [],
       tokens: {}
     }));
+    console.log(`✓ New database file created at: ${DB_FILE}`);
   }
 }
 
@@ -206,6 +217,51 @@ async function sendApprovalDecisionEmail(requester, approver, post, approved) {
     console.log(`✓ ${approved ? 'Approval' : 'Rejection'} email sent to ${requester.email}`);
   } catch (error) {
     console.error('Failed to send decision email:', error);
+  }
+}
+
+// Email to collaborator confirming their post was sent for approval
+async function sendCollaboratorConfirmationEmail(collaborator, approver, post) {
+  try {
+    await resend.emails.send({
+      from: FROM_EMAIL,
+      to: collaborator.email,
+      subject: '📬 Tu publicación ha sido enviada para aprobación',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h1 style="color: #0050cb;">📬 Solicitud de Aprobación Enviada</h1>
+          <p>Hola <strong>${collaborator.fullName}</strong>,</p>
+          <p>Tu publicación ha sido enviada a <strong>${approver.fullName}</strong> para su aprobación.</p>
+
+          <div style="background: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0;">
+            <p><strong>Caption:</strong></p>
+            <p style="white-space: pre-wrap;">${post.caption}</p>
+
+            ${post.scheduleDate && post.scheduleTime ? `
+              <p><strong>Fecha programada:</strong> ${post.scheduleDate} a las ${post.scheduleTime}</p>
+            ` : ''}
+
+            ${post.approvalStatus?.note ? `
+              <div style="background: #e7f3ff; border-left: 4px solid #0050cb; padding: 10px; margin-top: 10px;">
+                <p style="margin: 0; color: #004085;"><strong>Tu nota:</strong> ${post.approvalStatus.note}</p>
+              </div>
+            ` : ''}
+          </div>
+
+          <p>Recibirás una notificación cuando ${approver.fullName} revise tu publicación.</p>
+
+          <p>
+            <a href="${CONFIG.CLIENT_URL}"
+               style="background: #0050cb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; display: inline-block;">
+              Ver en la Plataforma
+            </a>
+          </p>
+        </div>
+      `
+    });
+    console.log(`✓ Confirmation email sent to ${collaborator.email}`);
+  } catch (error) {
+    console.error('Failed to send collaborator confirmation email:', error);
   }
 }
 
@@ -754,11 +810,14 @@ app.post('/api/posts/send-for-approval', async (req, res) => {
 
     await writeDB(db);
 
-    // Send email notification to approver
+    // Send email notifications
     const approver = db.users[approverId];
     const requester = db.users[userId];
     if (approver && requester) {
+      // Email to approver about the request
       await sendApprovalRequestEmail(approver, requester, post);
+      // Email to collaborator confirming submission
+      await sendCollaboratorConfirmationEmail(requester, approver, post);
     }
 
     res.json({ success: true, post });
@@ -783,6 +842,25 @@ app.get('/api/posts/pending-approval', async (req, res) => {
     res.json(pendingPosts);
   } catch (error) {
     console.error('Get pending approvals error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ GET MY PENDING APPROVALS (Collaborator's own posts) ============
+app.get('/api/posts/my-pending-approvals', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    const db = await readDB();
+
+    // Get posts that this user sent for approval
+    const myPendingPosts = db.posts.filter(p =>
+      (p.status === 'pending_approval' || p.status === 'rejected') &&
+      p.approvalStatus?.requestedBy === userId
+    );
+
+    res.json(myPendingPosts);
+  } catch (error) {
+    console.error('Get my pending approvals error:', error);
     res.status(500).json({ error: error.message });
   }
 });
