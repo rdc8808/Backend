@@ -99,14 +99,76 @@ app.get('/auth/facebook', (req, res) => {
   res.redirect(authUrl);
 });
 
-// ============ USER REGISTRATION ============
+// ============ USER REGISTRATION - FIRST USER ONLY ============
 app.post('/api/register', async (req, res) => {
   try {
     const { fullName, email, password } = req.body;
 
+    const db = await readDB();
+
+    // Only allow registration if NO users exist (first user setup)
+    if (Object.keys(db.users).length > 0) {
+      return res.status(403).json({
+        error: 'El registro público está deshabilitado. Solo administradores pueden crear nuevos usuarios.'
+      });
+    }
+
     // Validate required fields
     if (!fullName || !email || !password) {
       return res.status(400).json({ error: 'Todos los campos son requeridos' });
+    }
+
+    // Validate corporate email
+    const allowedDomains = ['@corebusinesscorp.com', '@rubicondigitalcorp.com'];
+    const emailDomain = email.substring(email.indexOf('@'));
+    if (!allowedDomains.includes(emailDomain)) {
+      return res.status(400).json({ error: 'Solo se permiten correos corporativos' });
+    }
+
+    // First user is always admin
+    db.users[email] = {
+      fullName,
+      email,
+      password, // In production, hash this with bcrypt!
+      role: 'admin',
+      createdAt: new Date().toISOString()
+    };
+
+    await writeDB(db);
+
+    res.json({
+      success: true,
+      message: 'Primer administrador creado exitosamente',
+      user: {
+        fullName,
+        email,
+        role: 'admin'
+      }
+    });
+  } catch (error) {
+    console.error('Registration error:', error);
+    res.status(500).json({ error: 'Error al registrar usuario' });
+  }
+});
+
+// ============ ADMIN - CREATE USER (INVITE) ============
+app.post('/api/admin/create-user', async (req, res) => {
+  try {
+    const { fullName, email, password, role, adminKey } = req.body;
+
+    // Verify admin key
+    if (adminKey !== 'rubicon2026admin') {
+      return res.status(403).json({ error: 'Acceso denegado. Solo administradores pueden crear usuarios.' });
+    }
+
+    // Validate required fields
+    if (!fullName || !email || !password) {
+      return res.status(400).json({ error: 'Todos los campos son requeridos' });
+    }
+
+    // Validate role
+    if (role && !['admin', 'collaborator'].includes(role)) {
+      return res.status(400).json({ error: 'Rol inválido' });
     }
 
     // Validate corporate email
@@ -123,32 +185,33 @@ app.post('/api/register', async (req, res) => {
       return res.status(400).json({ error: 'El correo electrónico ya existe' });
     }
 
-    // Determine role: first user is admin, rest are collaborators by default
-    const isFirstUser = Object.keys(db.users).length === 0;
-    const role = isFirstUser ? 'admin' : 'collaborator';
+    const userRole = role || 'collaborator';
 
     // Create user
     db.users[email] = {
       fullName,
       email,
       password, // In production, hash this with bcrypt!
-      role,
+      role: userRole,
       createdAt: new Date().toISOString()
     };
 
     await writeDB(db);
 
+    // TODO: Send welcome email with credentials
+
     res.json({
       success: true,
+      message: `Usuario ${userRole === 'admin' ? 'administrador' : 'colaborador'} creado exitosamente`,
       user: {
         fullName,
         email,
-        role
+        role: userRole
       }
     });
   } catch (error) {
-    console.error('Registration error:', error);
-    res.status(500).json({ error: 'Error al registrar usuario' });
+    console.error('Create user error:', error);
+    res.status(500).json({ error: 'Error al crear usuario' });
   }
 });
 
