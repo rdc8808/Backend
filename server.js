@@ -919,9 +919,9 @@ app.get('/api/posts/my-pending-approvals', async (req, res) => {
     const { userId } = req.query;
     const db = await readDB();
 
-    // Get posts that this user sent for approval
+    // Get posts that this user sent for approval (rejected posts are deleted, so only pending)
     const myPendingPosts = db.posts.filter(p =>
-      (p.status === 'pending_approval' || p.status === 'rejected') &&
+      p.status === 'pending_approval' &&
       p.approvalStatus?.requestedBy === userId
     );
 
@@ -977,32 +977,40 @@ app.post('/api/posts/reject', async (req, res) => {
     const { postId, approverId, reason } = req.body;
     const db = await readDB();
 
-    const post = db.posts.find(p => p.id === postId);
-    if (!post) {
+    const postIndex = db.posts.findIndex(p => p.id === postId);
+    if (postIndex === -1) {
       return res.status(404).json({ error: 'Post no encontrado' });
     }
+
+    const post = db.posts[postIndex];
 
     if (post.approvalStatus?.approverId !== approverId) {
       return res.status(403).json({ error: 'No tienes permiso para rechazar este post' });
     }
 
-    // Update post status
-    post.status = 'rejected';
+    // Get user info BEFORE deleting the post (for email)
+    const requester = db.users[post.approvalStatus.requestedBy];
+    const approver = db.users[approverId];
+
+    // Add rejection info for the email
     post.approvalStatus.approved = false;
     post.approvalStatus.approvedAt = new Date().toISOString();
     post.approvalStatus.rejectedReason = reason || 'Sin motivo especificado';
-    post.updatedAt = new Date().toISOString();
-
-    await writeDB(db);
 
     // Send email notification to requester
-    const requester = db.users[post.approvalStatus.requestedBy];
-    const approver = db.users[approverId];
     if (requester && approver) {
       await sendApprovalDecisionEmail(requester, approver, post, false);
     }
 
-    res.json({ success: true, post });
+    // CRITICAL: Remove the post completely from database
+    // Rejected posts should NOT remain in the system or be published
+    db.posts.splice(postIndex, 1);
+
+    await writeDB(db);
+
+    console.log(`🗑️ Post ${postId} rejected and deleted permanently`);
+
+    res.json({ success: true, message: 'Post rechazado y eliminado', post });
   } catch (error) {
     console.error('Reject post error:', error);
     res.status(500).json({ error: error.message });
@@ -1315,13 +1323,26 @@ cron.schedule('* * * * *', async () => {
   // Runs every minute
   try {
     const db = await readDB();
-    
+
     // Get current time in Lima, Peru timezone (UTC-5)
     const now = new Date();
     const limaTime = new Date(now.toLocaleString('en-US', { timeZone: 'America/Lima' }));
-    
+
     for (const post of db.posts) {
+      // CRITICAL: Only publish posts that are scheduled AND approved (or have no approval workflow)
       if (post.status !== 'scheduled') continue;
+
+      // Skip rejected posts - they should NEVER be published
+      if (post.approvalStatus?.approved === false) {
+        console.log(`⚠️ Skipping rejected post: ${post.id}`);
+        continue;
+      }
+
+      // If post went through approval workflow, ensure it was actually approved
+      if (post.approvalStatus && post.approvalStatus.approved !== true) {
+        console.log(`⚠️ Skipping non-approved post: ${post.id}`);
+        continue;
+      }
       
       // Parse the scheduled time in Lima timezone
       const scheduledDateTime = new Date(`${post.scheduleDate}T${post.scheduleTime}`);
