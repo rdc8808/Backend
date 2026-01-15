@@ -6,6 +6,7 @@ const FormData = require('form-data');
 const cron = require('node-cron');
 const fs = require('fs').promises;
 const path = require('path');
+const { Resend } = require('resend');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -86,6 +87,127 @@ const CONFIG = {
   REDIRECT_URI: process.env.REDIRECT_URI || 'http://localhost:3000/auth/callback',
   CLIENT_URL: process.env.CLIENT_URL || 'http://localhost:5173'
 };
+
+// Initialize Resend
+const resend = new Resend(process.env.RESEND_API_KEY);
+const FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev';
+
+// ============ EMAIL FUNCTIONS ============
+async function sendWelcomeEmail(user, password) {
+  try {
+    await resend.emails.send({
+      from: FROM_EMAIL,
+      to: user.email,
+      subject: 'Bienvenido a CBC Social Planner',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h1 style="color: #0050cb;">¡Bienvenido a CBC Social Planner!</h1>
+          <p>Hola <strong>${user.fullName}</strong>,</p>
+          <p>Tu cuenta ha sido creada exitosamente. Aquí están tus credenciales de acceso:</p>
+          <div style="background: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0;">
+            <p><strong>Email:</strong> ${user.email}</p>
+            <p><strong>Contraseña:</strong> ${password}</p>
+            <p><strong>Rol:</strong> ${user.role === 'admin' ? 'Administrador' : 'Colaborador'}</p>
+          </div>
+          <p>Accede a la plataforma en: <a href="${CONFIG.CLIENT_URL}">${CONFIG.CLIENT_URL}</a></p>
+          <p style="color: #666; font-size: 12px; margin-top: 30px;">
+            💡 Por seguridad, te recomendamos cambiar tu contraseña después del primer inicio de sesión.
+          </p>
+        </div>
+      `
+    });
+    console.log(`✓ Welcome email sent to ${user.email}`);
+  } catch (error) {
+    console.error('Failed to send welcome email:', error);
+  }
+}
+
+async function sendApprovalRequestEmail(approver, requester, post) {
+  try {
+    await resend.emails.send({
+      from: FROM_EMAIL,
+      to: approver.email,
+      subject: `Nueva solicitud de aprobación de ${requester.fullName}`,
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h1 style="color: #0050cb;">Nueva Solicitud de Aprobación</h1>
+          <p>Hola <strong>${approver.fullName}</strong>,</p>
+          <p><strong>${requester.fullName}</strong> ha enviado una publicación para tu aprobación.</p>
+
+          <div style="background: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0;">
+            <h3 style="margin-top: 0;">Detalles de la Publicación:</h3>
+            <p><strong>Caption:</strong></p>
+            <p style="white-space: pre-wrap;">${post.caption}</p>
+
+            ${post.scheduleDate && post.scheduleTime ? `
+              <p><strong>Programado para:</strong> ${post.scheduleDate} a las ${post.scheduleTime}</p>
+            ` : ''}
+
+            ${post.approvalStatus?.note ? `
+              <div style="background: #fff3cd; border-left: 4px solid #ffc107; padding: 10px; margin-top: 10px;">
+                <p style="margin: 0;"><strong>Nota:</strong> ${post.approvalStatus.note}</p>
+              </div>
+            ` : ''}
+          </div>
+
+          <p>
+            <a href="${CONFIG.CLIENT_URL}"
+               style="background: #0050cb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; display: inline-block;">
+              Revisar Solicitud
+            </a>
+          </p>
+        </div>
+      `
+    });
+    console.log(`✓ Approval request email sent to ${approver.email}`);
+  } catch (error) {
+    console.error('Failed to send approval request email:', error);
+  }
+}
+
+async function sendApprovalDecisionEmail(requester, approver, post, approved) {
+  try {
+    await resend.emails.send({
+      from: FROM_EMAIL,
+      to: requester.email,
+      subject: approved ? '✅ Tu publicación fue aprobada' : '❌ Tu publicación fue rechazada',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h1 style="color: ${approved ? '#28a745' : '#dc3545'};">
+            ${approved ? '✅ Publicación Aprobada' : '❌ Publicación Rechazada'}
+          </h1>
+          <p>Hola <strong>${requester.fullName}</strong>,</p>
+          <p><strong>${approver.fullName}</strong> ha ${approved ? 'aprobado' : 'rechazado'} tu publicación.</p>
+
+          <div style="background: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0;">
+            <p><strong>Caption:</strong></p>
+            <p style="white-space: pre-wrap;">${post.caption}</p>
+
+            ${approved && post.scheduleDate && post.scheduleTime ? `
+              <p style="color: #28a745;"><strong>✓ Se publicará el:</strong> ${post.scheduleDate} a las ${post.scheduleTime}</p>
+            ` : ''}
+
+            ${!approved && post.approvalStatus?.rejectedReason ? `
+              <div style="background: #f8d7da; border-left: 4px solid #dc3545; padding: 10px; margin-top: 10px;">
+                <p style="margin: 0; color: #721c24;"><strong>Motivo:</strong> ${post.approvalStatus.rejectedReason}</p>
+              </div>
+            ` : ''}
+          </div>
+
+          <p>
+            <a href="${CONFIG.CLIENT_URL}"
+               style="background: #0050cb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; display: inline-block;">
+              Ver en la Plataforma
+            </a>
+          </p>
+        </div>
+      `
+    });
+    console.log(`✓ ${approved ? 'Approval' : 'Rejection'} email sent to ${requester.email}`);
+  } catch (error) {
+    console.error('Failed to send decision email:', error);
+  }
+}
 
 // ============ FACEBOOK OAUTH ============
 app.get('/auth/facebook', (req, res) => {
@@ -198,11 +320,12 @@ app.post('/api/admin/create-user', async (req, res) => {
 
     await writeDB(db);
 
-    // TODO: Send welcome email with credentials
+    // Send welcome email with credentials
+    await sendWelcomeEmail(db.users[email], password);
 
     res.json({
       success: true,
-      message: `Usuario ${userRole === 'admin' ? 'administrador' : 'colaborador'} creado exitosamente`,
+      message: `Usuario ${userRole === 'admin' ? 'administrador' : 'colaborador'} creado exitosamente. Email de bienvenida enviado.`,
       user: {
         fullName,
         email,
@@ -631,7 +754,12 @@ app.post('/api/posts/send-for-approval', async (req, res) => {
 
     await writeDB(db);
 
-    // TODO: Send notification to approver
+    // Send email notification to approver
+    const approver = db.users[approverId];
+    const requester = db.users[userId];
+    if (approver && requester) {
+      await sendApprovalRequestEmail(approver, requester, post);
+    }
 
     res.json({ success: true, post });
   } catch (error) {
@@ -684,7 +812,12 @@ app.post('/api/posts/approve', async (req, res) => {
 
     await writeDB(db);
 
-    // TODO: Send notification to requester
+    // Send email notification to requester
+    const requester = db.users[post.approvalStatus.requestedBy];
+    const approver = db.users[approverId];
+    if (requester && approver) {
+      await sendApprovalDecisionEmail(requester, approver, post, true);
+    }
 
     res.json({ success: true, post });
   } catch (error) {
@@ -717,7 +850,12 @@ app.post('/api/posts/reject', async (req, res) => {
 
     await writeDB(db);
 
-    // TODO: Send notification to requester
+    // Send email notification to requester
+    const requester = db.users[post.approvalStatus.requestedBy];
+    const approver = db.users[approverId];
+    if (requester && approver) {
+      await sendApprovalDecisionEmail(requester, approver, post, false);
+    }
 
     res.json({ success: true, post });
   } catch (error) {
