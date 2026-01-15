@@ -123,11 +123,16 @@ app.post('/api/register', async (req, res) => {
       return res.status(400).json({ error: 'El correo electrónico ya existe' });
     }
 
+    // Determine role: first user is admin, rest are collaborators by default
+    const isFirstUser = Object.keys(db.users).length === 0;
+    const role = isFirstUser ? 'admin' : 'collaborator';
+
     // Create user
     db.users[email] = {
       fullName,
       email,
       password, // In production, hash this with bcrypt!
+      role,
       createdAt: new Date().toISOString()
     };
 
@@ -137,7 +142,8 @@ app.post('/api/register', async (req, res) => {
       success: true,
       user: {
         fullName,
-        email
+        email,
+        role
       }
     });
   } catch (error) {
@@ -167,7 +173,8 @@ app.post('/api/login', async (req, res) => {
       user: {
         fullName: user.fullName,
         email: user.email,
-        password: user.password
+        password: user.password,
+        role: user.role || 'admin' // Default to admin for existing users
       }
     });
   } catch (error) {
@@ -209,7 +216,8 @@ app.post('/api/update-password', async (req, res) => {
       user: {
         fullName: user.fullName,
         email: user.email,
-        password: newPassword
+        password: newPassword,
+        role: user.role || 'admin'
       }
     });
   } catch (error) {
@@ -694,6 +702,70 @@ app.post('/api/admin/reset-password', async (req, res) => {
   }
 });
 
+// ============ USER MANAGEMENT - Get all users (admin only) ============
+app.get('/api/users', async (req, res) => {
+  try {
+    const db = await readDB();
+    const userList = Object.values(db.users).map(u => ({
+      email: u.email,
+      fullName: u.fullName,
+      role: u.role || 'admin',
+      createdAt: u.createdAt
+    }));
+
+    res.json({
+      totalUsers: userList.length,
+      users: userList
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ USER MANAGEMENT - Update user role (admin only) ============
+app.post('/api/users/update-role', async (req, res) => {
+  try {
+    const { email, role, adminKey } = req.body;
+
+    // Simple admin verification
+    if (adminKey !== 'rubicon2026admin') {
+      return res.status(403).json({ error: 'Acceso denegado' });
+    }
+
+    if (!email || !role) {
+      return res.status(400).json({ error: 'Email y rol son requeridos' });
+    }
+
+    if (!['admin', 'collaborator'].includes(role)) {
+      return res.status(400).json({ error: 'Rol inválido. Debe ser "admin" o "collaborator"' });
+    }
+
+    const db = await readDB();
+    const user = db.users[email];
+
+    if (!user) {
+      return res.status(404).json({ error: 'Usuario no encontrado' });
+    }
+
+    // Update role
+    db.users[email].role = role;
+    await writeDB(db);
+
+    res.json({
+      success: true,
+      message: `Rol actualizado para ${email}`,
+      user: {
+        email: user.email,
+        fullName: user.fullName,
+        role: role
+      }
+    });
+  } catch (error) {
+    console.error('Update role error:', error);
+    res.status(500).json({ error: 'Error al actualizar rol' });
+  }
+});
+
 // ============ DEBUG ENDPOINT - Check all users ============
 app.get('/api/debug/users', async (req, res) => {
   try {
@@ -701,6 +773,7 @@ app.get('/api/debug/users', async (req, res) => {
     const userList = Object.values(db.users).map(u => ({
       email: u.email,
       fullName: u.fullName,
+      role: u.role || 'admin',
       createdAt: u.createdAt
     }));
 
