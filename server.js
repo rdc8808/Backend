@@ -529,6 +529,140 @@ app.post('/api/drafts', async (req, res) => {
   }
 });
 
+// ============ SEND POST FOR APPROVAL ============
+app.post('/api/posts/send-for-approval', async (req, res) => {
+  try {
+    const { userId, postData, approverId, note } = req.body;
+
+    if (!approverId) {
+      return res.status(400).json({ error: 'Debe seleccionar un aprobador' });
+    }
+
+    const db = await readDB();
+
+    const post = {
+      id: postData.id || Date.now().toString(),
+      userId: userId || 'default_user',
+      ...postData,
+      status: 'pending_approval',
+      approvalStatus: {
+        approverId,
+        requestedBy: userId,
+        requestedAt: new Date().toISOString(),
+        note: note || '',
+        approved: null,
+        approvedAt: null,
+        rejectedReason: null
+      },
+      createdAt: postData.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    // Update if exists, otherwise add
+    const index = db.posts.findIndex(p => p.id === post.id);
+    if (index !== -1) {
+      db.posts[index] = post;
+    } else {
+      db.posts.push(post);
+    }
+
+    await writeDB(db);
+
+    // TODO: Send notification to approver
+
+    res.json({ success: true, post });
+  } catch (error) {
+    console.error('Send for approval error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ GET PENDING APPROVALS ============
+app.get('/api/posts/pending-approval', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    const db = await readDB();
+
+    // Get posts pending approval for this user (as approver)
+    const pendingPosts = db.posts.filter(p =>
+      p.status === 'pending_approval' &&
+      p.approvalStatus?.approverId === userId
+    );
+
+    res.json(pendingPosts);
+  } catch (error) {
+    console.error('Get pending approvals error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ APPROVE POST ============
+app.post('/api/posts/approve', async (req, res) => {
+  try {
+    const { postId, approverId, scheduledDate, scheduledTime } = req.body;
+    const db = await readDB();
+
+    const post = db.posts.find(p => p.id === postId);
+    if (!post) {
+      return res.status(404).json({ error: 'Post no encontrado' });
+    }
+
+    if (post.approvalStatus?.approverId !== approverId) {
+      return res.status(403).json({ error: 'No tienes permiso para aprobar este post' });
+    }
+
+    // Update post status
+    post.status = 'scheduled';
+    post.scheduleDate = scheduledDate || post.scheduleDate;
+    post.scheduleTime = scheduledTime || post.scheduleTime;
+    post.approvalStatus.approved = true;
+    post.approvalStatus.approvedAt = new Date().toISOString();
+    post.updatedAt = new Date().toISOString();
+
+    await writeDB(db);
+
+    // TODO: Send notification to requester
+
+    res.json({ success: true, post });
+  } catch (error) {
+    console.error('Approve post error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ REJECT POST ============
+app.post('/api/posts/reject', async (req, res) => {
+  try {
+    const { postId, approverId, reason } = req.body;
+    const db = await readDB();
+
+    const post = db.posts.find(p => p.id === postId);
+    if (!post) {
+      return res.status(404).json({ error: 'Post no encontrado' });
+    }
+
+    if (post.approvalStatus?.approverId !== approverId) {
+      return res.status(403).json({ error: 'No tienes permiso para rechazar este post' });
+    }
+
+    // Update post status
+    post.status = 'rejected';
+    post.approvalStatus.approved = false;
+    post.approvalStatus.approvedAt = new Date().toISOString();
+    post.approvalStatus.rejectedReason = reason || 'Sin motivo especificado';
+    post.updatedAt = new Date().toISOString();
+
+    await writeDB(db);
+
+    // TODO: Send notification to requester
+
+    res.json({ success: true, post });
+  } catch (error) {
+    console.error('Reject post error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ============ SCHEDULE POST ============
 app.post('/api/schedule', async (req, res) => {
   try {
