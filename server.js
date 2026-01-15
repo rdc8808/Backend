@@ -101,7 +101,7 @@ const CONFIG = {
 
 // Initialize Resend
 const resend = new Resend(process.env.RESEND_API_KEY);
-const FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev';
+const FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'noreply@updates.rubiconcore.com';
 
 // ============ EMAIL FUNCTIONS ============
 async function sendWelcomeEmail(user, password) {
