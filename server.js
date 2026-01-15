@@ -106,7 +106,8 @@ const FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'onboarding@resend.dev';
 // ============ EMAIL FUNCTIONS ============
 async function sendWelcomeEmail(user, password) {
   try {
-    await resend.emails.send({
+    console.log(`📧 Attempting to send welcome email to ${user.email}...`);
+    const result = await resend.emails.send({
       from: FROM_EMAIL,
       to: user.email,
       subject: 'Bienvenido a CBC Social Planner',
@@ -127,15 +128,17 @@ async function sendWelcomeEmail(user, password) {
         </div>
       `
     });
-    console.log(`✓ Welcome email sent to ${user.email}`);
+    console.log(`✅ Welcome email sent successfully to ${user.email}`, result);
   } catch (error) {
-    console.error('Failed to send welcome email:', error);
+    console.error('❌ Failed to send welcome email:', error);
+    console.error('Error details:', JSON.stringify(error, null, 2));
   }
 }
 
 async function sendApprovalRequestEmail(approver, requester, post) {
   try {
-    await resend.emails.send({
+    console.log(`📧 Sending approval request email to admin ${approver.email}...`);
+    const result = await resend.emails.send({
       from: FROM_EMAIL,
       to: approver.email,
       subject: `Nueva solicitud de aprobación de ${requester.fullName}`,
@@ -170,15 +173,17 @@ async function sendApprovalRequestEmail(approver, requester, post) {
         </div>
       `
     });
-    console.log(`✓ Approval request email sent to ${approver.email}`);
+    console.log(`✅ Approval request email sent successfully to ${approver.email}`, result);
   } catch (error) {
-    console.error('Failed to send approval request email:', error);
+    console.error('❌ Failed to send approval request email:', error);
+    console.error('Error details:', JSON.stringify(error, null, 2));
   }
 }
 
 async function sendApprovalDecisionEmail(requester, approver, post, approved) {
   try {
-    await resend.emails.send({
+    console.log(`📧 Sending ${approved ? 'approval' : 'rejection'} email to ${requester.email}...`);
+    const result = await resend.emails.send({
       from: FROM_EMAIL,
       to: requester.email,
       subject: approved ? '✅ Tu publicación fue aprobada' : '❌ Tu publicación fue rechazada',
@@ -214,16 +219,18 @@ async function sendApprovalDecisionEmail(requester, approver, post, approved) {
         </div>
       `
     });
-    console.log(`✓ ${approved ? 'Approval' : 'Rejection'} email sent to ${requester.email}`);
+    console.log(`✅ ${approved ? 'Approval' : 'Rejection'} email sent successfully to ${requester.email}`, result);
   } catch (error) {
-    console.error('Failed to send decision email:', error);
+    console.error(`❌ Failed to send ${approved ? 'approval' : 'rejection'} email:`, error);
+    console.error('Error details:', JSON.stringify(error, null, 2));
   }
 }
 
 // Email to collaborator confirming their post was sent for approval
 async function sendCollaboratorConfirmationEmail(collaborator, approver, post) {
   try {
-    await resend.emails.send({
+    console.log(`📧 Sending confirmation email to collaborator ${collaborator.email}...`);
+    const result = await resend.emails.send({
       from: FROM_EMAIL,
       to: collaborator.email,
       subject: '📬 Tu publicación ha sido enviada para aprobación',
@@ -259,9 +266,10 @@ async function sendCollaboratorConfirmationEmail(collaborator, approver, post) {
         </div>
       `
     });
-    console.log(`✓ Confirmation email sent to ${collaborator.email}`);
+    console.log(`✅ Confirmation email sent successfully to ${collaborator.email}`, result);
   } catch (error) {
-    console.error('Failed to send collaborator confirmation email:', error);
+    console.error('❌ Failed to send collaborator confirmation email:', error);
+    console.error('Error details:', JSON.stringify(error, null, 2));
   }
 }
 
@@ -391,6 +399,65 @@ app.post('/api/admin/create-user', async (req, res) => {
   } catch (error) {
     console.error('Create user error:', error);
     res.status(500).json({ error: 'Error al crear usuario' });
+  }
+});
+
+// ============ ADMIN - DELETE USER ============
+app.delete('/api/admin/delete-user', async (req, res) => {
+  try {
+    const { emailToDelete, adminKey } = req.body;
+
+    // Verify admin key
+    if (adminKey !== 'rubicon2026admin') {
+      return res.status(403).json({ error: 'Acceso denegado. Solo administradores pueden eliminar usuarios.' });
+    }
+
+    if (!emailToDelete) {
+      return res.status(400).json({ error: 'Email del usuario a eliminar es requerido' });
+    }
+
+    const db = await readDB();
+
+    // Check if user exists
+    if (!db.users[emailToDelete]) {
+      return res.status(404).json({ error: 'Usuario no encontrado' });
+    }
+
+    // Prevent deletion if it's the only admin
+    const admins = Object.values(db.users).filter(u => u.role === 'admin');
+    if (db.users[emailToDelete].role === 'admin' && admins.length === 1) {
+      return res.status(400).json({ error: 'No puedes eliminar el único administrador del sistema' });
+    }
+
+    const deletedUser = db.users[emailToDelete];
+
+    // Delete user
+    delete db.users[emailToDelete];
+
+    // Delete user's tokens
+    if (db.tokens[emailToDelete]) {
+      delete db.tokens[emailToDelete];
+    }
+
+    // Delete user's posts
+    db.posts = db.posts.filter(p => p.userId !== emailToDelete);
+
+    await writeDB(db);
+
+    console.log(`🗑️ User deleted: ${emailToDelete} (${deletedUser.fullName})`);
+
+    res.json({
+      success: true,
+      message: `Usuario ${deletedUser.fullName} eliminado exitosamente`,
+      deletedUser: {
+        email: deletedUser.email,
+        fullName: deletedUser.fullName,
+        role: deletedUser.role
+      }
+    });
+  } catch (error) {
+    console.error('Delete user error:', error);
+    res.status(500).json({ error: 'Error al eliminar usuario' });
   }
 });
 
