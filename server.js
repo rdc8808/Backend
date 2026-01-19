@@ -1210,6 +1210,34 @@ app.get('/api/users', async (req, res) => {
   }
 });
 
+// ============ GET ALL USERS WITH PASSWORDS (Admin only) ============
+app.get('/api/admin/users-with-passwords', async (req, res) => {
+  try {
+    const { adminKey } = req.query;
+
+    // Verify admin key
+    if (adminKey !== 'rubicon2026admin') {
+      return res.status(403).json({ error: 'Acceso denegado. Solo administradores.' });
+    }
+
+    const db = await readDB();
+    const userList = Object.values(db.users).map(u => ({
+      email: u.email,
+      fullName: u.fullName,
+      password: u.password, // Include password for admin
+      role: u.role || 'admin',
+      createdAt: u.createdAt
+    }));
+
+    res.json({
+      totalUsers: userList.length,
+      users: userList
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ============ USER MANAGEMENT - Update user role (admin only) ============
 app.post('/api/users/update-role', async (req, res) => {
   try {
