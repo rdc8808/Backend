@@ -8,8 +8,8 @@ const fs = require('fs').promises;
 const path = require('path');
 const { Resend } = require('resend');
 
-// Import PostgreSQL database functions
-const db = require('./database-pg');
+// Import hybrid database layer (works with PostgreSQL or JSON)
+const { initDB, readDB, writeDB, usePostgres } = require('./server-pg');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1391,10 +1391,10 @@ cron.schedule('* * * * *', async () => {
 });
 
 // ============ START SERVER ============
-db.initDB().then(() => {
+initDB().then(() => {
   app.listen(PORT, () => {
     console.log(`🚀 Social Planner API running on port ${PORT}`);
-    console.log(`📊 Using PostgreSQL database (Supabase)`);
+    console.log(`📊 Database: ${usePostgres ? 'PostgreSQL (Supabase) ✅' : 'JSON (fallback) ⚠️'}`);
     console.log(`🔵 Facebook OAuth: http://localhost:${PORT}/auth/facebook`);
     console.log(`🔵 LinkedIn OAuth: http://localhost:${PORT}/auth/linkedin`);
   });
