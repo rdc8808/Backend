@@ -8,6 +8,9 @@ const fs = require('fs').promises;
 const path = require('path');
 const { Resend } = require('resend');
 
+// Import PostgreSQL database functions
+const db = require('./database-pg');
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -52,41 +55,19 @@ Allow: /
 // Storage setup
 const upload = multer({ dest: 'uploads/' });
 
-// Database file (using JSON for simplicity - use real DB in production)
-// Use persistent path on Render, local path in development
+// ============ DATABASE SETUP ============
+// Using PostgreSQL (Supabase) for persistent storage
+// Old JSON database code commented out below
+
+/* OLD JSON DATABASE (NO LONGER USED)
 const DB_FILE = process.env.NODE_ENV === 'production'
   ? '/opt/render/project/data/database.json'
   : path.join(__dirname, 'database.json');
 
-// Initialize database
-async function initDB() {
-  try {
-    // Ensure data directory exists (for Render)
-    const dbDir = path.dirname(DB_FILE);
-    await fs.mkdir(dbDir, { recursive: true });
-
-    // Check if database file exists
-    await fs.access(DB_FILE);
-    console.log(`✓ Database file found at: ${DB_FILE}`);
-  } catch {
-    // Create new database file
-    await fs.writeFile(DB_FILE, JSON.stringify({
-      users: {},
-      posts: [],
-      tokens: {}
-    }));
-    console.log(`✓ New database file created at: ${DB_FILE}`);
-  }
-}
-
-async function readDB() {
-  const data = await fs.readFile(DB_FILE, 'utf8');
-  return JSON.parse(data);
-}
-
-async function writeDB(data) {
-  await fs.writeFile(DB_FILE, JSON.stringify(data, null, 2));
-}
+async function initDB() { ... }
+async function readDB() { ... }
+async function writeDB(data) { ... }
+*/
 
 // ============ CONFIGURATION ============
 // Add these to your .env file
@@ -1410,10 +1391,14 @@ cron.schedule('* * * * *', async () => {
 });
 
 // ============ START SERVER ============
-initDB().then(() => {
+db.initDB().then(() => {
   app.listen(PORT, () => {
-    console.log(`Social Planner API running on port ${PORT}`);
-    console.log(`Facebook OAuth: http://localhost:${PORT}/auth/facebook`);
-    console.log(`LinkedIn OAuth: http://localhost:${PORT}/auth/linkedin`);
+    console.log(`🚀 Social Planner API running on port ${PORT}`);
+    console.log(`📊 Using PostgreSQL database (Supabase)`);
+    console.log(`🔵 Facebook OAuth: http://localhost:${PORT}/auth/facebook`);
+    console.log(`🔵 LinkedIn OAuth: http://localhost:${PORT}/auth/linkedin`);
   });
+}).catch(err => {
+  console.error('❌ Failed to start server:', err);
+  process.exit(1);
 });
