@@ -1,13 +1,24 @@
 // PostgreSQL Database Handler - PERSISTENT STORAGE
 const { Pool } = require('pg');
 
-// Create PostgreSQL connection pool
-const pool = new Pool({
+// Parse connection string to force IPv4 and add proper config
+const connectionConfig = {
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? {
     rejectUnauthorized: false
-  } : false
-});
+  } : false,
+  // Add connection stability settings
+  keepAlive: true,
+  connectionTimeoutMillis: 10000,
+  // Supabase-specific optimizations
+  max: 20, // maximum pool size
+  idleTimeoutMillis: 30000,
+  // Force IPv4 family for Render compatibility
+  ...(process.env.NODE_ENV === 'production' && { family: 4 })
+};
+
+// Create PostgreSQL connection pool
+const pool = new Pool(connectionConfig);
 
 // Initialize database tables
 async function initDB() {
