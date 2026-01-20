@@ -1078,10 +1078,9 @@ app.post('/api/post-now', async (req, res) => {
 // ============ GET POSTS ============
 app.get('/api/posts', async (req, res) => {
   try {
-    const userId = req.query.userId || 'default_user';
     const db = await readDB();
-    const posts = db.posts.filter(p => p.userId === userId);
-    res.json(posts);
+    // Return ALL posts (APP-LEVEL) - all users see all posts
+    res.json(db.posts || []);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
