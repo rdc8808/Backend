@@ -555,17 +555,18 @@ app.get('/auth/callback', async (req, res) => {
 
       console.log('Facebook pages response:', pagesResponse.data);
 
-      // Save tokens
+      // Save tokens at APP-LEVEL (shared by all users)
       const db = await readDB();
-      if (!db.tokens[userId]) db.tokens[userId] = {};
-      db.tokens[userId].facebook = {
+      if (!db.tokens['app']) db.tokens['app'] = {};
+      db.tokens['app'].facebook = {
         accessToken: accessToken,
         pages: pagesResponse.data.data || [],
-        connectedAt: new Date().toISOString()
+        connectedAt: new Date().toISOString(),
+        connectedBy: userId // Track who connected it
       };
       await writeDB(db);
 
-      console.log('Saved Facebook tokens for user:', userId, 'Pages count:', db.tokens[userId].facebook.pages.length);
+      console.log('Saved Facebook tokens at app level. Connected by:', userId, 'Pages count:', db.tokens['app'].facebook.pages.length);
 
     } else if (platform === 'linkedin') {
       // Exchange code for access token
@@ -590,13 +591,14 @@ app.get('/auth/callback', async (req, res) => {
         headers: { Authorization: `Bearer ${accessToken}` }
       });
 
-      // Save tokens
+      // Save tokens at APP-LEVEL (shared by all users)
       const db = await readDB();
-      if (!db.tokens[userId]) db.tokens[userId] = {};
-      db.tokens[userId].linkedin = {
+      if (!db.tokens['app']) db.tokens['app'] = {};
+      db.tokens['app'].linkedin = {
         accessToken: accessToken,
         profile: profileResponse.data,
-        connectedAt: new Date().toISOString()
+        connectedAt: new Date().toISOString(),
+        connectedBy: userId // Track who connected it
       };
       await writeDB(db);
     }
@@ -611,9 +613,10 @@ app.get('/auth/callback', async (req, res) => {
 // ============ POST TO FACEBOOK ============
 async function postToFacebook(userId, postData) {
   const db = await readDB();
-  const fbToken = db.tokens[userId]?.facebook;
+  // Use APP-LEVEL tokens (shared by all users)
+  const fbToken = db.tokens['app']?.facebook;
 
-  if (!fbToken) throw new Error('Facebook not connected');
+  if (!fbToken) throw new Error('Facebook no está conectado');
   if (!fbToken.pages || fbToken.pages.length === 0) {
     throw new Error('No Facebook pages found. Please reconnect your Facebook account.');
   }
@@ -694,9 +697,10 @@ async function postToFacebook(userId, postData) {
 // ============ POST TO LINKEDIN ============
 async function postToLinkedIn(userId, postData) {
   const db = await readDB();
-  const liToken = db.tokens[userId]?.linkedin;
+  // Use APP-LEVEL tokens (shared by all users)
+  const liToken = db.tokens['app']?.linkedin;
 
-  if (!liToken) throw new Error('LinkedIn not connected');
+  if (!liToken) throw new Error('LinkedIn no está conectado');
 
   // Use 'sub' field from OpenID Connect userinfo response
   const personURN = `urn:li:person:${liToken.profile.sub}`;
@@ -1098,13 +1102,13 @@ app.delete('/api/posts/:postId', async (req, res) => {
 // ============ CHECK CONNECTION STATUS ============
 app.get('/api/connections', async (req, res) => {
   try {
-    const userId = req.query.userId || 'default_user';
     const db = await readDB();
-    const tokens = db.tokens[userId] || {};
+    // Check APP-LEVEL tokens (shared by all users)
+    const appTokens = db.tokens['app'] || {};
 
     res.json({
-      facebook: !!tokens.facebook,
-      linkedin: !!tokens.linkedin,
+      facebook: !!appTokens.facebook,
+      linkedin: !!appTokens.linkedin,
       instagram: false // We'll add this later if needed
     });
   } catch (error) {
@@ -1118,18 +1122,25 @@ app.post('/api/disconnect', async (req, res) => {
     const { userId, platform } = req.body;
     const db = await readDB();
 
-    if (!db.tokens[userId]) {
-      return res.status(404).json({ error: 'User not found' });
+    // Check if user is admin
+    const user = db.users[userId];
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({ error: 'Solo administradores pueden desconectar cuentas' });
     }
 
-    if (platform === 'facebook' && db.tokens[userId].facebook) {
-      delete db.tokens[userId].facebook;
-    } else if (platform === 'linkedin' && db.tokens[userId].linkedin) {
-      delete db.tokens[userId].linkedin;
+    // Disconnect at APP-LEVEL (affects all users)
+    if (!db.tokens['app']) {
+      return res.status(404).json({ error: 'No hay conexiones' });
+    }
+
+    if (platform === 'facebook' && db.tokens['app'].facebook) {
+      delete db.tokens['app'].facebook;
+    } else if (platform === 'linkedin' && db.tokens['app'].linkedin) {
+      delete db.tokens['app'].linkedin;
     }
 
     await writeDB(db);
-    res.json({ success: true, message: `${platform} disconnected successfully` });
+    res.json({ success: true, message: `${platform} desconectado para todos los usuarios` });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
