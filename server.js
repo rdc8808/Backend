@@ -260,7 +260,7 @@ app.get('/auth/facebook', (req, res) => {
   const authUrl = `https://www.facebook.com/v18.0/dialog/oauth?` +
     `client_id=${CONFIG.FACEBOOK_APP_ID}` +
     `&redirect_uri=${encodeURIComponent(CONFIG.REDIRECT_URI)}` +
-    `&scope=pages_manage_posts,pages_read_engagement,pages_show_list,publish_video` +
+    `&scope=pages_manage_posts,pages_read_engagement,pages_show_list` +
     `&state=facebook_${userId}`;
   
   res.redirect(authUrl);
