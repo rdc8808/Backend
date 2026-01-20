@@ -1089,9 +1089,15 @@ app.get('/api/posts', async (req, res) => {
 // ============ DELETE POST ============
 app.delete('/api/posts/:postId', async (req, res) => {
   try {
-    const db = await readDB();
-    db.posts = db.posts.filter(p => p.id !== req.params.postId);
-    await writeDB(db);
+    // Use PostgreSQL direct delete if available
+    if (usePostgres && pgDb) {
+      await pgDb.deletePost(req.params.postId);
+    } else {
+      // Fallback to JSON
+      const db = await readDB();
+      db.posts = db.posts.filter(p => p.id !== req.params.postId);
+      await writeDB(db);
+    }
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
