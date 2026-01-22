@@ -591,29 +591,35 @@ app.get('/auth/callback', async (req, res) => {
         headers: { Authorization: `Bearer ${accessToken}` }
       });
 
-      // Get organization pages (like Facebook pages)
-      const organizationsResponse = await axios.get(
-        `https://api.linkedin.com/v2/organizationalEntityAcls?q=roleAssignee&role=ADMINISTRATOR&projection=(elements*(organizationalTarget~(localizedName,vanityName)))`,
-        {
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            'X-Restli-Protocol-Version': '2.0.0'
+      // Get organization pages (like Facebook pages) - wrapped in try-catch
+      let organizations = [];
+      try {
+        const organizationsResponse = await axios.get(
+          `https://api.linkedin.com/v2/organizationalEntityAcls?q=roleAssignee&role=ADMINISTRATOR&projection=(elements*(organizationalTarget~(localizedName,vanityName)))`,
+          {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              'X-Restli-Protocol-Version': '2.0.0'
+            }
           }
-        }
-      );
+        );
 
-      console.log('LinkedIn organizations response:', organizationsResponse.data);
+        console.log('LinkedIn organizations response:', organizationsResponse.data);
 
-      // Extract organization pages
-      const organizations = organizationsResponse.data.elements?.map(element => {
-        const org = element['organizationalTarget~'];
-        const orgId = element.organizationalTarget?.split(':').pop(); // Extract ID from URN
-        return {
-          id: orgId,
-          name: org?.localizedName,
-          vanityName: org?.vanityName
-        };
-      }) || [];
+        // Extract organization pages
+        organizations = organizationsResponse.data.elements?.map(element => {
+          const org = element['organizationalTarget~'];
+          const orgId = element.organizationalTarget?.split(':').pop(); // Extract ID from URN
+          return {
+            id: orgId,
+            name: org?.localizedName,
+            vanityName: org?.vanityName
+          };
+        }) || [];
+      } catch (orgError) {
+        console.warn('⚠️ Could not fetch LinkedIn organizations:', orgError.response?.data || orgError.message);
+        console.warn('⚠️ Will save tokens without organization pages. User may need admin permissions on LinkedIn page.');
+      }
 
       // Save tokens at APP-LEVEL (shared by all users)
       const db = await readDB();
