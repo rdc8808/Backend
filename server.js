@@ -9,7 +9,7 @@ const path = require('path');
 const { Resend } = require('resend');
 
 // Import hybrid database layer (works with PostgreSQL or JSON)
-const { initDB, readDB, writeDB, usePostgres } = require('./server-pg');
+const { initDB, readDB, writeDB, usePostgres, pgDb } = require('./server-pg');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
