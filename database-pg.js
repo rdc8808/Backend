@@ -16,7 +16,7 @@ function parseConnectionString(url) {
     // Connection stability
     keepAlive: true,
     connectionTimeoutMillis: 10000,
-    max: 20,
+    max: 2, // CRITICAL: Render Free = 512MB RAM, limit connections to save memory
     idleTimeoutMillis: 30000
   };
 }
