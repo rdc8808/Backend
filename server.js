@@ -591,16 +591,43 @@ app.get('/auth/callback', async (req, res) => {
         headers: { Authorization: `Bearer ${accessToken}` }
       });
 
+      // Get organization pages (like Facebook pages)
+      const organizationsResponse = await axios.get(
+        `https://api.linkedin.com/v2/organizationalEntityAcls?q=roleAssignee&role=ADMINISTRATOR&projection=(elements*(organizationalTarget~(localizedName,vanityName)))`,
+        {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'X-Restli-Protocol-Version': '2.0.0'
+          }
+        }
+      );
+
+      console.log('LinkedIn organizations response:', organizationsResponse.data);
+
+      // Extract organization pages
+      const organizations = organizationsResponse.data.elements?.map(element => {
+        const org = element['organizationalTarget~'];
+        const orgId = element.organizationalTarget?.split(':').pop(); // Extract ID from URN
+        return {
+          id: orgId,
+          name: org?.localizedName,
+          vanityName: org?.vanityName
+        };
+      }) || [];
+
       // Save tokens at APP-LEVEL (shared by all users)
       const db = await readDB();
       if (!db.tokens['app']) db.tokens['app'] = {};
       db.tokens['app'].linkedin = {
         accessToken: accessToken,
         profile: profileResponse.data,
+        organizations: organizations, // Store organization pages
         connectedAt: new Date().toISOString(),
         connectedBy: userId // Track who connected it
       };
       await writeDB(db);
+
+      console.log('Saved LinkedIn tokens at app level. Connected by:', userId, 'Organizations count:', organizations.length);
     }
 
     res.redirect(`${CONFIG.CLIENT_URL}?connected=${platform}`);
@@ -702,8 +729,14 @@ async function postToLinkedIn(userId, postData) {
 
   if (!liToken) throw new Error('LinkedIn no está conectado');
 
-  // Use 'sub' field from OpenID Connect userinfo response
-  const personURN = `urn:li:person:${liToken.profile.sub}`;
+  // Use organization (company page) instead of personal profile
+  if (!liToken.organizations || liToken.organizations.length === 0) {
+    throw new Error('No se encontraron páginas de LinkedIn. Por favor, reconecta tu cuenta de LinkedIn.');
+  }
+
+  // Use first organization (company page)
+  const organization = liToken.organizations[0];
+  const organizationURN = `urn:li:organization:${organization.id}`;
 
   // Detect media type
   let mediaCategory = 'NONE';
@@ -717,7 +750,7 @@ async function postToLinkedIn(userId, postData) {
   }
 
   const postBody = {
-    author: personURN,
+    author: organizationURN, // Post as organization, not person
     lifecycleState: 'PUBLISHED',
     specificContent: {
       'com.linkedin.ugc.ShareContent': {
@@ -742,7 +775,7 @@ async function postToLinkedIn(userId, postData) {
       {
         registerUploadRequest: {
           recipes: [recipe],
-          owner: personURN,
+          owner: organizationURN, // Upload media as organization
           serviceRelationships: [{
             relationshipType: 'OWNER',
             identifier: 'urn:li:userGeneratedContent'
@@ -1134,17 +1167,24 @@ app.post('/api/disconnect', async (req, res) => {
     }
 
     // Disconnect at APP-LEVEL (affects all users)
-    if (!db.tokens['app']) {
-      return res.status(404).json({ error: 'No hay conexiones' });
+    if (usePostgres && pgDb) {
+      // Use PostgreSQL direct delete
+      await pgDb.deleteTokens('app', platform);
+    } else {
+      // Fallback to JSON
+      if (!db.tokens['app']) {
+        return res.status(404).json({ error: 'No hay conexiones' });
+      }
+
+      if (platform === 'facebook' && db.tokens['app'].facebook) {
+        delete db.tokens['app'].facebook;
+      } else if (platform === 'linkedin' && db.tokens['app'].linkedin) {
+        delete db.tokens['app'].linkedin;
+      }
+
+      await writeDB(db);
     }
 
-    if (platform === 'facebook' && db.tokens['app'].facebook) {
-      delete db.tokens['app'].facebook;
-    } else if (platform === 'linkedin' && db.tokens['app'].linkedin) {
-      delete db.tokens['app'].linkedin;
-    }
-
-    await writeDB(db);
     res.json({ success: true, message: `${platform} desconectado para todos los usuarios` });
   } catch (error) {
     res.status(500).json({ error: error.message });
