@@ -1135,6 +1135,11 @@ app.post('/api/post-now', async (req, res) => {
 // ============ GET POSTS ============
 app.get('/api/posts', async (req, res) => {
   try {
+    // Log request for debugging excessive API calls
+    const userId = req.query.userId || 'unknown';
+    const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+    console.log(`📊 GET /api/posts - User: ${userId} - IP: ${ip} - Time: ${new Date().toISOString()}`);
+
     const db = await readDB();
     const posts = db.posts || [];
 
@@ -1198,6 +1203,7 @@ app.get('/api/connections', async (req, res) => {
     res.json({
       facebook: !!appTokens.facebook,
       linkedin: !!appTokens.linkedin,
+      linkedinOrganization: appTokens.linkedin?.organizations?.[0] || null, // First organization
       instagram: false // We'll add this later if needed
     });
   } catch (error) {
