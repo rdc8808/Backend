@@ -930,7 +930,16 @@ app.get('/api/posts/pending-approval', async (req, res) => {
       p.approvalStatus?.approverId === userId
     );
 
-    res.json(pendingPosts);
+    // Strip media to reduce egress
+    const postsWithoutMedia = pendingPosts.map(post => {
+      const { media, ...postWithoutMedia } = post;
+      return {
+        ...postWithoutMedia,
+        hasMedia: !!media
+      };
+    });
+
+    res.json(postsWithoutMedia);
   } catch (error) {
     console.error('Get pending approvals error:', error);
     res.status(500).json({ error: error.message });
@@ -949,7 +958,16 @@ app.get('/api/posts/my-pending-approvals', async (req, res) => {
       p.approvalStatus?.requestedBy === userId
     );
 
-    res.json(myPendingPosts);
+    // Strip media to reduce egress
+    const postsWithoutMedia = myPendingPosts.map(post => {
+      const { media, ...postWithoutMedia } = post;
+      return {
+        ...postWithoutMedia,
+        hasMedia: !!media
+      };
+    });
+
+    res.json(postsWithoutMedia);
   } catch (error) {
     console.error('Get my pending approvals error:', error);
     res.status(500).json({ error: error.message });
@@ -1118,8 +1136,35 @@ app.post('/api/post-now', async (req, res) => {
 app.get('/api/posts', async (req, res) => {
   try {
     const db = await readDB();
-    // Return ALL posts (APP-LEVEL) - all users see all posts
-    res.json(db.posts || []);
+    const posts = db.posts || [];
+
+    // Strip media field to reduce Supabase egress (media is base64 encoded images/videos)
+    // A 5MB image = ~6.7MB in base64. Removing media reduces response from ~70MB to ~100KB
+    const postsWithoutMedia = posts.map(post => {
+      const { media, ...postWithoutMedia } = post;
+      return {
+        ...postWithoutMedia,
+        hasMedia: !!media // Boolean flag to indicate if post has media
+      };
+    });
+
+    res.json(postsWithoutMedia);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ GET MEDIA FOR SPECIFIC POST ============
+app.get('/api/posts/:postId/media', async (req, res) => {
+  try {
+    const db = await readDB();
+    const post = db.posts.find(p => p.id === req.params.postId);
+
+    if (!post) {
+      return res.status(404).json({ error: 'Post not found' });
+    }
+
+    res.json({ media: post.media || null });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
