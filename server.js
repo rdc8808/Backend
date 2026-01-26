@@ -604,18 +604,23 @@ app.get('/auth/callback', async (req, res) => {
           }
         );
 
-        console.log('LinkedIn organizations response:', organizationsResponse.data);
+        console.log('LinkedIn organizations response:', JSON.stringify(organizationsResponse.data, null, 2));
 
         // Extract organization pages
         organizations = organizationsResponse.data.elements?.map(element => {
           const org = element['organizationalTarget~'];
           const orgId = element.organizationalTarget?.split(':').pop(); // Extract ID from URN
+
+          console.log('Organization object:', JSON.stringify(org, null, 2));
+
           return {
             id: orgId,
-            name: org?.localizedName,
-            vanityName: org?.vanityName
+            name: org?.localizedName || org?.['localizedName'] || 'Unknown Organization',
+            vanityName: org?.vanityName || org?.['vanityName']
           };
         }) || [];
+
+        console.log('Extracted organizations:', JSON.stringify(organizations, null, 2));
       } catch (orgError) {
         console.warn('⚠️ Could not fetch LinkedIn organizations:', orgError.response?.data || orgError.message);
         console.warn('⚠️ Will save tokens without organization pages. User may need admin permissions on LinkedIn page.');
@@ -816,19 +821,29 @@ async function postToLinkedIn(userId, postData) {
     }];
   }
 
-  const response = await axios.post(
-    'https://api.linkedin.com/v2/ugcPosts',
-    postBody,
-    {
-      headers: {
-        Authorization: `Bearer ${liToken.accessToken}`,
-        'Content-Type': 'application/json',
-        'X-Restli-Protocol-Version': '2.0.0'
-      }
-    }
-  );
+  try {
+    console.log('🔵 Posting to LinkedIn organization:', organizationURN);
+    console.log('🔵 Post body:', JSON.stringify(postBody, null, 2));
 
-  return response.data;
+    const response = await axios.post(
+      'https://api.linkedin.com/v2/ugcPosts',
+      postBody,
+      {
+        headers: {
+          Authorization: `Bearer ${liToken.accessToken}`,
+          'Content-Type': 'application/json',
+          'X-Restli-Protocol-Version': '2.0.0'
+        }
+      }
+    );
+
+    console.log('✅ LinkedIn post successful:', response.data);
+    return response.data;
+  } catch (error) {
+    console.error('❌ LinkedIn posting error:', error.response?.data || error.message);
+    console.error('❌ Full error:', JSON.stringify(error.response?.data, null, 2));
+    throw new Error(`LinkedIn posting failed: ${error.response?.data?.message || error.message}`);
+  }
 }
 
 // ============ SAVE DRAFT ============
