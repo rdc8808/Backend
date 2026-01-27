@@ -761,7 +761,7 @@ async function postToLinkedIn(userId, postData) {
   }
 
   const postBody = {
-    author: organizationURN, // Post as organization, not person
+    author: organizationURN,
     lifecycleState: 'PUBLISHED',
     specificContent: {
       'com.linkedin.ugc.ShareContent': {
@@ -773,6 +773,9 @@ async function postToLinkedIn(userId, postData) {
     },
     visibility: {
       'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC'
+    },
+    distribution: {
+      feedDistribution: 'MAIN_FEED'
     }
   };
 
