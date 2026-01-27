@@ -52,6 +52,7 @@ async function initDB() {
         user_id VARCHAR(255) NOT NULL,
         caption TEXT,
         media TEXT,
+        media_url TEXT,
         platforms_facebook BOOLEAN DEFAULT false,
         platforms_linkedin BOOLEAN DEFAULT false,
         linkedin_organization_id VARCHAR(255),
@@ -62,7 +63,8 @@ async function initDB() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         published_at TIMESTAMP,
-        results JSONB
+        results JSONB,
+        deleted_at TIMESTAMP DEFAULT NULL
       )
     `);
 
@@ -141,13 +143,22 @@ async function deleteUser(email) {
 }
 
 // Post operations
-async function getPosts(userId = null) {
+async function getPosts(userId = null, includeDeleted = false) {
   let query = 'SELECT * FROM posts';
   let params = [];
+  let whereConditions = [];
 
   if (userId) {
-    query += ' WHERE user_id = $1';
-    params = [userId];
+    whereConditions.push('user_id = $1');
+    params.push(userId);
+  }
+
+  if (!includeDeleted) {
+    whereConditions.push('deleted_at IS NULL');
+  }
+
+  if (whereConditions.length > 0) {
+    query += ' WHERE ' + whereConditions.join(' AND ');
   }
 
   query += ' ORDER BY created_at DESC';
@@ -157,7 +168,8 @@ async function getPosts(userId = null) {
     id: row.id,
     userId: row.user_id,
     caption: row.caption,
-    media: row.media,
+    mediaUrl: row.media_url,
+    hasMedia: !!row.media_url,
     platforms: {
       facebook: row.platforms_facebook,
       linkedin: row.platforms_linkedin
@@ -170,12 +182,18 @@ async function getPosts(userId = null) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     publishedAt: row.published_at,
+    deletedAt: row.deleted_at,
     results: row.results
   }));
 }
 
-async function getPost(id) {
-  const result = await pool.query('SELECT * FROM posts WHERE id = $1', [id]);
+async function getPost(id, includeDeleted = false) {
+  let query = 'SELECT * FROM posts WHERE id = $1';
+  if (!includeDeleted) {
+    query += ' AND deleted_at IS NULL';
+  }
+
+  const result = await pool.query(query, [id]);
   if (result.rows.length === 0) return null;
 
   const row = result.rows[0];
@@ -184,6 +202,8 @@ async function getPost(id) {
     userId: row.user_id,
     caption: row.caption,
     media: row.media,
+    mediaUrl: row.media_url,
+    hasMedia: !!row.media_url,
     platforms: {
       facebook: row.platforms_facebook,
       linkedin: row.platforms_linkedin
@@ -196,6 +216,7 @@ async function getPost(id) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     publishedAt: row.published_at,
+    deletedAt: row.deleted_at,
     results: row.results
   };
 }
@@ -203,16 +224,17 @@ async function getPost(id) {
 async function createPost(post) {
   await pool.query(
     `INSERT INTO posts (
-      id, user_id, caption, media,
+      id, user_id, caption, media, media_url,
       platforms_facebook, platforms_linkedin, linkedin_organization_id,
       schedule_date, schedule_time, status, approval_status,
       created_at, updated_at
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
     [
       post.id,
       post.userId,
       post.caption,
-      post.media,
+      post.media || null,
+      post.mediaUrl || null,
       post.platforms?.facebook || false,
       post.platforms?.linkedin || false,
       post.linkedInOrganizationId || null,
@@ -238,6 +260,10 @@ async function updatePost(id, updates) {
   if (updates.media !== undefined) {
     setClauses.push(`media = $${paramCount++}`);
     values.push(updates.media);
+  }
+  if (updates.mediaUrl !== undefined) {
+    setClauses.push(`media_url = $${paramCount++}`);
+    values.push(updates.mediaUrl);
   }
   if (updates.platforms) {
     if (updates.platforms.facebook !== undefined) {
@@ -277,6 +303,10 @@ async function updatePost(id, updates) {
     setClauses.push(`results = $${paramCount++}`);
     values.push(JSON.stringify(updates.results));
   }
+  if (updates.deletedAt !== undefined) {
+    setClauses.push(`deleted_at = $${paramCount++}`);
+    values.push(updates.deletedAt);
+  }
 
   setClauses.push(`updated_at = $${paramCount++}`);
   values.push(new Date().toISOString());
@@ -291,6 +321,25 @@ async function updatePost(id, updates) {
 
 async function deletePost(id) {
   await pool.query('DELETE FROM posts WHERE id = $1', [id]);
+}
+
+async function softDeletePost(id) {
+  await pool.query(
+    'UPDATE posts SET deleted_at = $1, updated_at = $1 WHERE id = $2',
+    [new Date().toISOString(), id]
+  );
+}
+
+async function getPostsForCleanup(monthsOld = 3) {
+  const cutoffDate = new Date();
+  cutoffDate.setMonth(cutoffDate.getMonth() - monthsOld);
+
+  const result = await pool.query(
+    'SELECT id, media_url FROM posts WHERE published_at < $1 AND deleted_at IS NULL AND media_url IS NOT NULL',
+    [cutoffDate.toISOString()]
+  );
+
+  return result.rows;
 }
 
 // Token operations
@@ -373,6 +422,8 @@ module.exports = {
   createPost,
   updatePost,
   deletePost,
+  softDeletePost,
+  getPostsForCleanup,
   getTokens,
   getAllTokens,
   saveTokens,

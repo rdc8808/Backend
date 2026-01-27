@@ -7,17 +7,31 @@ const cron = require('node-cron');
 const fs = require('fs').promises;
 const path = require('path');
 const { Resend } = require('resend');
+const rateLimit = require('express-rate-limit');
 
-// Import hybrid database layer (works with PostgreSQL or JSON)
-const { initDB, readDB, writeDB, usePostgres, pgDb } = require('./server-pg');
+// Import PostgreSQL database (direct queries only - no more readDB/writeDB)
+const pgDb = require('./database-pg');
+
+// Import Supabase Storage
+const storage = require('./storage');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Rate limiting - prevent abuse (10 requests per minute per IP)
+const limiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 60, // 60 requests per minute
+  message: 'Demasiadas solicitudes. Por favor intenta más tarde.',
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(limiter); // Apply rate limiting to all routes
 
 // Root endpoint for Facebook verification
 app.get('/', (req, res) => {
@@ -271,10 +285,10 @@ app.post('/api/register', async (req, res) => {
   try {
     const { fullName, email, password } = req.body;
 
-    const db = await readDB();
+    const users = await pgDb.getUsers();
 
     // Only allow registration if NO users exist (first user setup)
-    if (Object.keys(db.users).length > 0) {
+    if (Object.keys(users).length > 0) {
       return res.status(403).json({
         error: 'El registro público está deshabilitado. Solo administradores pueden crear nuevos usuarios.'
       });
@@ -293,15 +307,7 @@ app.post('/api/register', async (req, res) => {
     }
 
     // First user is always admin
-    db.users[email] = {
-      fullName,
-      email,
-      password, // In production, hash this with bcrypt!
-      role: 'admin',
-      createdAt: new Date().toISOString()
-    };
-
-    await writeDB(db);
+    await pgDb.createUser(email, fullName, password, 'admin');
 
     res.json({
       success: true,
@@ -345,28 +351,21 @@ app.post('/api/admin/create-user', async (req, res) => {
       return res.status(400).json({ error: 'Solo se permiten correos corporativos' });
     }
 
-    const db = await readDB();
-
     // Check if user already exists
-    if (db.users[email]) {
+    const existingUser = await pgDb.getUser(email);
+    if (existingUser) {
       return res.status(400).json({ error: 'El correo electrónico ya existe' });
     }
 
     const userRole = role || 'collaborator';
 
     // Create user
-    db.users[email] = {
-      fullName,
-      email,
-      password, // In production, hash this with bcrypt!
-      role: userRole,
-      createdAt: new Date().toISOString()
-    };
+    await pgDb.createUser(email, fullName, password, userRole);
 
-    await writeDB(db);
+    const newUser = await pgDb.getUser(email);
 
     // Send welcome email with credentials
-    await sendWelcomeEmail(db.users[email], password);
+    await sendWelcomeEmail(newUser, password);
 
     res.json({
       success: true,
@@ -397,43 +396,40 @@ app.delete('/api/admin/delete-user', async (req, res) => {
       return res.status(400).json({ error: 'Email del usuario a eliminar es requerido' });
     }
 
-    const db = await readDB();
-
     // Check if user exists
-    if (!db.users[emailToDelete]) {
+    const userToDelete = await pgDb.getUser(emailToDelete);
+    if (!userToDelete) {
       return res.status(404).json({ error: 'Usuario no encontrado' });
     }
 
     // Prevent deletion if it's the only admin
-    const admins = Object.values(db.users).filter(u => u.role === 'admin');
-    if (db.users[emailToDelete].role === 'admin' && admins.length === 1) {
+    const allUsers = await pgDb.getUsers();
+    const admins = Object.values(allUsers).filter(u => u.role === 'admin');
+    if (userToDelete.role === 'admin' && admins.length === 1) {
       return res.status(400).json({ error: 'No puedes eliminar el único administrador del sistema' });
     }
 
-    const deletedUser = db.users[emailToDelete];
-
-    // Delete user
-    delete db.users[emailToDelete];
-
-    // Delete user's tokens
-    if (db.tokens[emailToDelete]) {
-      delete db.tokens[emailToDelete];
+    // Delete user's posts (soft delete)
+    const userPosts = await pgDb.getPosts(emailToDelete);
+    for (const post of userPosts) {
+      await pgDb.softDeletePost(post.id);
     }
 
-    // Delete user's posts
-    db.posts = db.posts.filter(p => p.userId !== emailToDelete);
+    // Delete user's tokens
+    await pgDb.deleteTokens(emailToDelete);
 
-    await writeDB(db);
+    // Delete user
+    await pgDb.deleteUser(emailToDelete);
 
-    console.log(`🗑️ User deleted: ${emailToDelete} (${deletedUser.fullName})`);
+    console.log(`🗑️ User deleted: ${emailToDelete} (${userToDelete.fullName})`);
 
     res.json({
       success: true,
-      message: `Usuario ${deletedUser.fullName} eliminado exitosamente`,
+      message: `Usuario ${userToDelete.fullName} eliminado exitosamente`,
       deletedUser: {
-        email: deletedUser.email,
-        fullName: deletedUser.fullName,
-        role: deletedUser.role
+        email: userToDelete.email,
+        fullName: userToDelete.fullName,
+        role: userToDelete.role
       }
     });
   } catch (error) {
@@ -451,8 +447,7 @@ app.post('/api/login', async (req, res) => {
       return res.status(400).json({ error: 'Email y contraseña son requeridos' });
     }
 
-    const db = await readDB();
-    const user = db.users[email];
+    const user = await pgDb.getUser(email);
 
     if (!user || user.password !== password) {
       return res.status(401).json({ error: 'Credenciales inválidas' });
@@ -464,7 +459,7 @@ app.post('/api/login', async (req, res) => {
         fullName: user.fullName,
         email: user.email,
         password: user.password,
-        role: user.role || 'admin' // Default to admin for existing users
+        role: user.role || 'admin'
       }
     });
   } catch (error) {
@@ -482,8 +477,7 @@ app.post('/api/update-password', async (req, res) => {
       return res.status(400).json({ error: 'Todos los campos son requeridos' });
     }
 
-    const db = await readDB();
-    const user = db.users[email];
+    const user = await pgDb.getUser(email);
 
     if (!user) {
       return res.status(404).json({ error: 'Usuario no encontrado' });
@@ -498,8 +492,7 @@ app.post('/api/update-password', async (req, res) => {
     }
 
     // Update password
-    db.users[email].password = newPassword;
-    await writeDB(db);
+    await pgDb.updateUserPassword(email, newPassword);
 
     res.json({
       success: true,
@@ -556,17 +549,14 @@ app.get('/auth/callback', async (req, res) => {
       console.log('Facebook pages response:', pagesResponse.data);
 
       // Save tokens at APP-LEVEL (shared by all users)
-      const db = await readDB();
-      if (!db.tokens['app']) db.tokens['app'] = {};
-      db.tokens['app'].facebook = {
+      await pgDb.saveTokens('app', 'facebook', {
         accessToken: accessToken,
         pages: pagesResponse.data.data || [],
         connectedAt: new Date().toISOString(),
-        connectedBy: userId // Track who connected it
-      };
-      await writeDB(db);
+        connectedBy: userId
+      });
 
-      console.log('Saved Facebook tokens at app level. Connected by:', userId, 'Pages count:', db.tokens['app'].facebook.pages.length);
+      console.log('Saved Facebook tokens at app level. Connected by:', userId, 'Pages count:', (pagesResponse.data.data || []).length);
 
     } else if (platform === 'linkedin') {
       // Exchange code for access token
@@ -627,16 +617,13 @@ app.get('/auth/callback', async (req, res) => {
       }
 
       // Save tokens at APP-LEVEL (shared by all users)
-      const db = await readDB();
-      if (!db.tokens['app']) db.tokens['app'] = {};
-      db.tokens['app'].linkedin = {
+      await pgDb.saveTokens('app', 'linkedin', {
         accessToken: accessToken,
         profile: profileResponse.data,
-        organizations: organizations, // Store organization pages
+        organizations: organizations,
         connectedAt: new Date().toISOString(),
-        connectedBy: userId // Track who connected it
-      };
-      await writeDB(db);
+        connectedBy: userId
+      });
 
       console.log('Saved LinkedIn tokens at app level. Connected by:', userId, 'Organizations count:', organizations.length);
     }
@@ -650,9 +637,9 @@ app.get('/auth/callback', async (req, res) => {
 
 // ============ POST TO FACEBOOK ============
 async function postToFacebook(userId, postData) {
-  const db = await readDB();
   // Use APP-LEVEL tokens (shared by all users)
-  const fbToken = db.tokens['app']?.facebook;
+  const appTokens = await pgDb.getTokens('app');
+  const fbToken = appTokens.facebook;
 
   if (!fbToken) throw new Error('Facebook no está conectado');
   if (!fbToken.pages || fbToken.pages.length === 0) {
@@ -734,9 +721,9 @@ async function postToFacebook(userId, postData) {
 
 // ============ POST TO LINKEDIN ============
 async function postToLinkedIn(userId, postData, organizationId = null) {
-  const db = await readDB();
   // Use APP-LEVEL tokens (shared by all users)
-  const liToken = db.tokens['app']?.linkedin;
+  const appTokens = await pgDb.getTokens('app');
+  const liToken = appTokens.linkedin;
 
   if (!liToken) throw new Error('LinkedIn no está conectado');
 
@@ -858,27 +845,47 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
 app.post('/api/drafts', async (req, res) => {
   try {
     const { userId, postData } = req.body;
-    const db = await readDB();
+
+    const postId = postData.id || Date.now().toString();
+
+    // Upload media to Supabase Storage if exists
+    let mediaUrl = null;
+    if (postData.media) {
+      try {
+        mediaUrl = await storage.uploadMedia(postData.media, userId);
+        console.log(`✅ Media uploaded for draft ${postId}: ${mediaUrl}`);
+      } catch (uploadError) {
+        console.error('❌ Media upload failed:', uploadError);
+        return res.status(500).json({ error: 'Error al subir la imagen/video' });
+      }
+    }
 
     const post = {
-      id: postData.id || Date.now().toString(),
+      id: postId,
       userId: userId || 'default_user',
-      ...postData,
+      caption: postData.caption,
+      mediaUrl: mediaUrl,
+      platforms: postData.platforms,
+      linkedInOrganizationId: postData.linkedInOrganizationId,
+      scheduleDate: postData.scheduleDate,
+      scheduleTime: postData.scheduleTime,
       status: 'draft',
+      approvalStatus: postData.approvalStatus || null,
       createdAt: postData.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
 
-    // Update if exists, otherwise add
-    const index = db.posts.findIndex(p => p.id === post.id);
-    if (index !== -1) {
-      db.posts[index] = post;
+    // Check if post exists
+    const existingPost = await pgDb.getPost(postId);
+    if (existingPost) {
+      // Update existing
+      await pgDb.updatePost(postId, post);
     } else {
-      db.posts.push(post);
+      // Create new
+      await pgDb.createPost(post);
     }
 
-    await writeDB(db);
-    res.json({ success: true, post });
+    res.json({ success: true, post: { ...post, hasMedia: !!mediaUrl } });
   } catch (error) {
     console.error('Draft error:', error);
     res.status(500).json({ error: error.message });
@@ -894,12 +901,29 @@ app.post('/api/posts/send-for-approval', async (req, res) => {
       return res.status(400).json({ error: 'Debe seleccionar un aprobador' });
     }
 
-    const db = await readDB();
+    const postId = postData.id || Date.now().toString();
+
+    // Upload media to Supabase Storage if exists
+    let mediaUrl = null;
+    if (postData.media) {
+      try {
+        mediaUrl = await storage.uploadMedia(postData.media, userId);
+        console.log(`✅ Media uploaded for approval ${postId}: ${mediaUrl}`);
+      } catch (uploadError) {
+        console.error('❌ Media upload failed:', uploadError);
+        return res.status(500).json({ error: 'Error al subir la imagen/video' });
+      }
+    }
 
     const post = {
-      id: postData.id || Date.now().toString(),
+      id: postId,
       userId: userId || 'default_user',
-      ...postData,
+      caption: postData.caption,
+      mediaUrl: mediaUrl,
+      platforms: postData.platforms,
+      linkedInOrganizationId: postData.linkedInOrganizationId,
+      scheduleDate: postData.scheduleDate,
+      scheduleTime: postData.scheduleTime,
       status: 'pending_approval',
       approvalStatus: {
         approverId,
@@ -914,27 +938,23 @@ app.post('/api/posts/send-for-approval', async (req, res) => {
       updatedAt: new Date().toISOString()
     };
 
-    // Update if exists, otherwise add
-    const index = db.posts.findIndex(p => p.id === post.id);
-    if (index !== -1) {
-      db.posts[index] = post;
+    // Check if post exists
+    const existingPost = await pgDb.getPost(postId);
+    if (existingPost) {
+      await pgDb.updatePost(postId, post);
     } else {
-      db.posts.push(post);
+      await pgDb.createPost(post);
     }
 
-    await writeDB(db);
-
     // Send email notifications
-    const approver = db.users[approverId];
-    const requester = db.users[userId];
+    const approver = await pgDb.getUser(approverId);
+    const requester = await pgDb.getUser(userId);
     if (approver && requester) {
-      // Email to approver about the request
       await sendApprovalRequestEmail(approver, requester, post);
-      // Email to collaborator confirming submission
       await sendCollaboratorConfirmationEmail(requester, approver, post);
     }
 
-    res.json({ success: true, post });
+    res.json({ success: true, post: { ...post, hasMedia: !!mediaUrl } });
   } catch (error) {
     console.error('Send for approval error:', error);
     res.status(500).json({ error: error.message });
@@ -945,24 +965,40 @@ app.post('/api/posts/send-for-approval', async (req, res) => {
 app.get('/api/posts/pending-approval', async (req, res) => {
   try {
     const { userId } = req.query;
-    const db = await readDB();
 
-    // Get posts pending approval for this user (as approver)
-    const pendingPosts = db.posts.filter(p =>
-      p.status === 'pending_approval' &&
-      p.approvalStatus?.approverId === userId
+    // Direct query - only get posts with status = pending_approval for this approver
+    const result = await pgDb.pool.query(
+      `SELECT id, user_id, caption, media_url, platforms_facebook, platforms_linkedin,
+       linkedin_organization_id, schedule_date, schedule_time, status, approval_status,
+       created_at, updated_at
+       FROM posts
+       WHERE status = 'pending_approval'
+       AND approval_status->>'approverId' = $1
+       AND deleted_at IS NULL
+       ORDER BY created_at DESC`,
+      [userId]
     );
 
-    // Strip media to reduce egress
-    const postsWithoutMedia = pendingPosts.map(post => {
-      const { media, ...postWithoutMedia } = post;
-      return {
-        ...postWithoutMedia,
-        hasMedia: !!media
-      };
-    });
+    const posts = result.rows.map(row => ({
+      id: row.id,
+      userId: row.user_id,
+      caption: row.caption,
+      mediaUrl: row.media_url,
+      hasMedia: !!row.media_url,
+      platforms: {
+        facebook: row.platforms_facebook,
+        linkedin: row.platforms_linkedin
+      },
+      linkedInOrganizationId: row.linkedin_organization_id,
+      scheduleDate: row.schedule_date,
+      scheduleTime: row.schedule_time,
+      status: row.status,
+      approvalStatus: row.approval_status,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }));
 
-    res.json(postsWithoutMedia);
+    res.json(posts);
   } catch (error) {
     console.error('Get pending approvals error:', error);
     res.status(500).json({ error: error.message });
@@ -973,24 +1009,40 @@ app.get('/api/posts/pending-approval', async (req, res) => {
 app.get('/api/posts/my-pending-approvals', async (req, res) => {
   try {
     const { userId } = req.query;
-    const db = await readDB();
 
-    // Get posts that this user sent for approval (rejected posts are deleted, so only pending)
-    const myPendingPosts = db.posts.filter(p =>
-      p.status === 'pending_approval' &&
-      p.approvalStatus?.requestedBy === userId
+    // Direct query - only get posts this user sent for approval
+    const result = await pgDb.pool.query(
+      `SELECT id, user_id, caption, media_url, platforms_facebook, platforms_linkedin,
+       linkedin_organization_id, schedule_date, schedule_time, status, approval_status,
+       created_at, updated_at
+       FROM posts
+       WHERE status = 'pending_approval'
+       AND approval_status->>'requestedBy' = $1
+       AND deleted_at IS NULL
+       ORDER BY created_at DESC`,
+      [userId]
     );
 
-    // Strip media to reduce egress
-    const postsWithoutMedia = myPendingPosts.map(post => {
-      const { media, ...postWithoutMedia } = post;
-      return {
-        ...postWithoutMedia,
-        hasMedia: !!media
-      };
-    });
+    const posts = result.rows.map(row => ({
+      id: row.id,
+      userId: row.user_id,
+      caption: row.caption,
+      mediaUrl: row.media_url,
+      hasMedia: !!row.media_url,
+      platforms: {
+        facebook: row.platforms_facebook,
+        linkedin: row.platforms_linkedin
+      },
+      linkedInOrganizationId: row.linkedin_organization_id,
+      scheduleDate: row.schedule_date,
+      scheduleTime: row.schedule_time,
+      status: row.status,
+      approvalStatus: row.approval_status,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }));
 
-    res.json(postsWithoutMedia);
+    res.json(posts);
   } catch (error) {
     console.error('Get my pending approvals error:', error);
     res.status(500).json({ error: error.message });
@@ -1001,9 +1053,9 @@ app.get('/api/posts/my-pending-approvals', async (req, res) => {
 app.post('/api/posts/approve', async (req, res) => {
   try {
     const { postId, approverId, scheduledDate, scheduledTime } = req.body;
-    const db = await readDB();
 
-    const post = db.posts.find(p => p.id === postId);
+    // Get post - direct query, no full DB load
+    const post = await pgDb.getPost(postId);
     if (!post) {
       return res.status(404).json({ error: 'Post no encontrado' });
     }
@@ -1012,24 +1064,32 @@ app.post('/api/posts/approve', async (req, res) => {
       return res.status(403).json({ error: 'No tienes permiso para aprobar este post' });
     }
 
-    // Update post status
-    post.status = 'scheduled';
-    post.scheduleDate = scheduledDate || post.scheduleDate;
-    post.scheduleTime = scheduledTime || post.scheduleTime;
-    post.approvalStatus.approved = true;
-    post.approvalStatus.approvedAt = new Date().toISOString();
-    post.updatedAt = new Date().toISOString();
+    // Update approval status
+    const updatedApprovalStatus = {
+      ...post.approvalStatus,
+      approved: true,
+      approvedAt: new Date().toISOString()
+    };
 
-    await writeDB(db);
+    // Update post - ONLY this post, not entire DB
+    await pgDb.updatePost(postId, {
+      status: 'scheduled',
+      scheduleDate: scheduledDate || post.scheduleDate,
+      scheduleTime: scheduledTime || post.scheduleTime,
+      approvalStatus: updatedApprovalStatus
+    });
+
+    // Get updated post for response
+    const updatedPost = await pgDb.getPost(postId);
 
     // Send email notification to requester
-    const requester = db.users[post.approvalStatus.requestedBy];
-    const approver = db.users[approverId];
+    const requester = await pgDb.getUser(post.approvalStatus.requestedBy);
+    const approver = await pgDb.getUser(approverId);
     if (requester && approver) {
-      await sendApprovalDecisionEmail(requester, approver, post, true);
+      await sendApprovalDecisionEmail(requester, approver, updatedPost, true);
     }
 
-    res.json({ success: true, post });
+    res.json({ success: true, post: updatedPost });
   } catch (error) {
     console.error('Approve post error:', error);
     res.status(500).json({ error: error.message });
@@ -1040,42 +1100,53 @@ app.post('/api/posts/approve', async (req, res) => {
 app.post('/api/posts/reject', async (req, res) => {
   try {
     const { postId, approverId, reason } = req.body;
-    const db = await readDB();
 
-    const postIndex = db.posts.findIndex(p => p.id === postId);
-    if (postIndex === -1) {
+    // Get post - direct query
+    const post = await pgDb.getPost(postId);
+    if (!post) {
       return res.status(404).json({ error: 'Post no encontrado' });
     }
-
-    const post = db.posts[postIndex];
 
     if (post.approvalStatus?.approverId !== approverId) {
       return res.status(403).json({ error: 'No tienes permiso para rechazar este post' });
     }
 
-    // Get user info BEFORE deleting the post (for email)
-    const requester = db.users[post.approvalStatus.requestedBy];
-    const approver = db.users[approverId];
+    // Get user info BEFORE deleting (for email)
+    const requester = await pgDb.getUser(post.approvalStatus.requestedBy);
+    const approver = await pgDb.getUser(approverId);
 
     // Add rejection info for the email
-    post.approvalStatus.approved = false;
-    post.approvalStatus.approvedAt = new Date().toISOString();
-    post.approvalStatus.rejectedReason = reason || 'Sin motivo especificado';
+    const rejectedPost = {
+      ...post,
+      approvalStatus: {
+        ...post.approvalStatus,
+        approved: false,
+        approvedAt: new Date().toISOString(),
+        rejectedReason: reason || 'Sin motivo especificado'
+      }
+    };
 
     // Send email notification to requester
     if (requester && approver) {
-      await sendApprovalDecisionEmail(requester, approver, post, false);
+      await sendApprovalDecisionEmail(requester, approver, rejectedPost, false);
     }
 
-    // CRITICAL: Remove the post completely from database
+    // CRITICAL: Delete the post completely (hard delete)
     // Rejected posts should NOT remain in the system or be published
-    db.posts.splice(postIndex, 1);
+    await pgDb.deletePost(postId);
 
-    await writeDB(db);
+    // Also delete media from storage if exists
+    if (post.mediaUrl) {
+      try {
+        await storage.deleteMedia(post.mediaUrl);
+      } catch (err) {
+        console.warn('⚠️ Could not delete media:', err.message);
+      }
+    }
 
     console.log(`🗑️ Post ${postId} rejected and deleted permanently`);
 
-    res.json({ success: true, message: 'Post rechazado y eliminado', post });
+    res.json({ success: true, message: 'Post rechazado y eliminado' });
   } catch (error) {
     console.error('Reject post error:', error);
     res.status(500).json({ error: error.message });
@@ -1086,27 +1157,45 @@ app.post('/api/posts/reject', async (req, res) => {
 app.post('/api/schedule', async (req, res) => {
   try {
     const { userId, postData } = req.body;
-    const db = await readDB();
+
+    const postId = postData.id || Date.now().toString();
+
+    // Upload media to Supabase Storage if exists
+    let mediaUrl = null;
+    if (postData.media) {
+      try {
+        mediaUrl = await storage.uploadMedia(postData.media, userId);
+        console.log(`✅ Media uploaded for schedule ${postId}: ${mediaUrl}`);
+      } catch (uploadError) {
+        console.error('❌ Media upload failed:', uploadError);
+        return res.status(500).json({ error: 'Error al subir la imagen/video' });
+      }
+    }
 
     const post = {
-      id: postData.id || Date.now().toString(),
+      id: postId,
       userId: userId || 'default_user',
-      ...postData,
+      caption: postData.caption,
+      mediaUrl: mediaUrl,
+      platforms: postData.platforms,
+      linkedInOrganizationId: postData.linkedInOrganizationId,
+      scheduleDate: postData.scheduleDate,
+      scheduleTime: postData.scheduleTime,
       status: 'scheduled',
+      approvalStatus: postData.approvalStatus || null,
       createdAt: postData.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
 
-    // Update if exists, otherwise add
-    const index = db.posts.findIndex(p => p.id === post.id);
-    if (index !== -1) {
-      db.posts[index] = post;
+    // Check if post exists
+    const existingPost = await pgDb.getPost(postId);
+    if (existingPost) {
+      await pgDb.updatePost(postId, post);
     } else {
-      db.posts.push(post);
+      await pgDb.createPost(post);
     }
 
-    await writeDB(db);
-    res.json({ success: true, post });
+    res.json({ success: true, post: { ...post, hasMedia: !!mediaUrl } });
   } catch (error) {
     console.error('Schedule error:', error);
     res.status(500).json({ error: error.message });
@@ -1117,38 +1206,73 @@ app.post('/api/schedule', async (req, res) => {
 app.post('/api/post-now', async (req, res) => {
   try {
     const { userId, postData } = req.body;
+
+    const postId = postData.id || Date.now().toString();
+
+    // Upload media to Supabase Storage if exists
+    let mediaUrl = null;
+    if (postData.media) {
+      try {
+        mediaUrl = await storage.uploadMedia(postData.media, userId);
+        console.log(`✅ Media uploaded for post-now ${postId}: ${mediaUrl}`);
+      } catch (uploadError) {
+        console.error('❌ Media upload failed:', uploadError);
+        return res.status(500).json({ error: 'Error al subir la imagen/video' });
+      }
+    }
+
+    // For posting, we need base64 (Facebook/LinkedIn APIs require it)
+    // If we have mediaUrl, download it back as base64
+    let mediaBase64 = postData.media;
+    if (mediaUrl && !mediaBase64) {
+      try {
+        mediaBase64 = await storage.downloadMediaAsBase64(mediaUrl);
+      } catch (err) {
+        console.warn('⚠️ Could not download media for posting:', err.message);
+      }
+    }
+
+    const postDataWithMedia = {
+      ...postData,
+      media: mediaBase64
+    };
+
     const results = {};
 
     if (postData.platforms.facebook) {
-      results.facebook = await postToFacebook(userId || 'default_user', postData);
+      results.facebook = await postToFacebook(userId || 'default_user', postDataWithMedia);
     }
 
     if (postData.platforms.linkedin) {
-      results.linkedin = await postToLinkedIn(userId || 'default_user', postData, postData.linkedInOrganizationId);
+      results.linkedin = await postToLinkedIn(userId || 'default_user', postDataWithMedia, postData.linkedInOrganizationId);
     }
 
-    // Save to database as published
-    const db = await readDB();
+    // Save to database as published (with mediaUrl, not base64)
     const post = {
-      id: postData.id || Date.now().toString(),
+      id: postId,
       userId: userId || 'default_user',
-      ...postData,
+      caption: postData.caption,
+      mediaUrl: mediaUrl,
+      platforms: postData.platforms,
+      linkedInOrganizationId: postData.linkedInOrganizationId,
+      scheduleDate: postData.scheduleDate,
+      scheduleTime: postData.scheduleTime,
       status: 'published',
       publishedAt: new Date().toISOString(),
-      results: results
+      results: results,
+      createdAt: postData.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString()
     };
 
-    // Update if exists, otherwise add
-    const index = db.posts.findIndex(p => p.id === post.id);
-    if (index !== -1) {
-      db.posts[index] = post;
+    // Check if post exists
+    const existingPost = await pgDb.getPost(postId);
+    if (existingPost) {
+      await pgDb.updatePost(postId, post);
     } else {
-      db.posts.push(post);
+      await pgDb.createPost(post);
     }
 
-    await writeDB(db);
-
-    res.json({ success: true, results, post });
+    res.json({ success: true, results, post: { ...post, hasMedia: !!mediaUrl } });
   } catch (error) {
     console.error('Post error:', error);
     res.status(500).json({ error: error.message });
@@ -1158,26 +1282,14 @@ app.post('/api/post-now', async (req, res) => {
 // ============ GET POSTS ============
 app.get('/api/posts', async (req, res) => {
   try {
-    // Log request for debugging excessive API calls
-    const userId = req.query.userId || 'unknown';
-    const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
-    console.log(`📊 GET /api/posts - User: ${userId} - IP: ${ip} - Time: ${new Date().toISOString()}`);
+    const userId = req.query.userId || null;
 
-    const db = await readDB();
-    const posts = db.posts || [];
+    // Direct query - only fetch necessary fields (no media base64)
+    const posts = await pgDb.getPosts(userId);
 
-    // Strip media field to reduce Supabase egress (media is base64 encoded images/videos)
-    // A 5MB image = ~6.7MB in base64. Removing media reduces response from ~70MB to ~100KB
-    const postsWithoutMedia = posts.map(post => {
-      const { media, ...postWithoutMedia } = post;
-      return {
-        ...postWithoutMedia,
-        hasMedia: !!media // Boolean flag to indicate if post has media
-      };
-    });
-
-    res.json(postsWithoutMedia);
+    res.json(posts);
   } catch (error) {
+    console.error('Get posts error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1185,15 +1297,16 @@ app.get('/api/posts', async (req, res) => {
 // ============ GET MEDIA FOR SPECIFIC POST ============
 app.get('/api/posts/:postId/media', async (req, res) => {
   try {
-    const db = await readDB();
-    const post = db.posts.find(p => p.id === req.params.postId);
+    const post = await pgDb.getPost(req.params.postId);
 
     if (!post) {
       return res.status(404).json({ error: 'Post not found' });
     }
 
-    res.json({ media: post.media || null });
+    // Return media URL (frontend will fetch from Supabase Storage directly)
+    res.json({ mediaUrl: post.mediaUrl || null });
   } catch (error) {
+    console.error('Get media error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1201,17 +1314,29 @@ app.get('/api/posts/:postId/media', async (req, res) => {
 // ============ DELETE POST ============
 app.delete('/api/posts/:postId', async (req, res) => {
   try {
-    // Use PostgreSQL direct delete if available
-    if (usePostgres && pgDb) {
-      await pgDb.deletePost(req.params.postId);
-    } else {
-      // Fallback to JSON
-      const db = await readDB();
-      db.posts = db.posts.filter(p => p.id !== req.params.postId);
-      await writeDB(db);
+    const postId = req.params.postId;
+
+    // Get post to check if it has media
+    const post = await pgDb.getPost(postId);
+
+    if (post) {
+      // Delete media from storage if exists
+      if (post.mediaUrl) {
+        try {
+          await storage.deleteMedia(post.mediaUrl);
+          console.log(`🗑️ Media deleted: ${post.mediaUrl}`);
+        } catch (err) {
+          console.warn('⚠️ Could not delete media:', err.message);
+        }
+      }
+
+      // Delete post from database
+      await pgDb.deletePost(postId);
     }
+
     res.json({ success: true });
   } catch (error) {
+    console.error('Delete post error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1219,17 +1344,17 @@ app.delete('/api/posts/:postId', async (req, res) => {
 // ============ CHECK CONNECTION STATUS ============
 app.get('/api/connections', async (req, res) => {
   try {
-    const db = await readDB();
     // Check APP-LEVEL tokens (shared by all users)
-    const appTokens = db.tokens['app'] || {};
+    const appTokens = await pgDb.getTokens('app');
 
     res.json({
       facebook: !!appTokens.facebook,
       linkedin: !!appTokens.linkedin,
-      linkedinOrganizations: appTokens.linkedin?.organizations || [], // Return full array
-      instagram: false // We'll add this later if needed
+      linkedinOrganizations: appTokens.linkedin?.organizations || [],
+      instagram: false
     });
   } catch (error) {
+    console.error('Get connections error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1238,35 +1363,19 @@ app.get('/api/connections', async (req, res) => {
 app.post('/api/disconnect', async (req, res) => {
   try {
     const { userId, platform } = req.body;
-    const db = await readDB();
 
     // Check if user is admin
-    const user = db.users[userId];
+    const user = await pgDb.getUser(userId);
     if (!user || user.role !== 'admin') {
       return res.status(403).json({ error: 'Solo administradores pueden desconectar cuentas' });
     }
 
     // Disconnect at APP-LEVEL (affects all users)
-    if (usePostgres && pgDb) {
-      // Use PostgreSQL direct delete
-      await pgDb.deleteTokens('app', platform);
-    } else {
-      // Fallback to JSON
-      if (!db.tokens['app']) {
-        return res.status(404).json({ error: 'No hay conexiones' });
-      }
-
-      if (platform === 'facebook' && db.tokens['app'].facebook) {
-        delete db.tokens['app'].facebook;
-      } else if (platform === 'linkedin' && db.tokens['app'].linkedin) {
-        delete db.tokens['app'].linkedin;
-      }
-
-      await writeDB(db);
-    }
+    await pgDb.deleteTokens('app', platform);
 
     res.json({ success: true, message: `${platform} desconectado para todos los usuarios` });
   } catch (error) {
+    console.error('Disconnect error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1285,16 +1394,14 @@ app.post('/api/admin/reset-password', async (req, res) => {
       return res.status(400).json({ error: 'Email y nueva contraseña son requeridos' });
     }
 
-    const db = await readDB();
-    const user = db.users[email];
+    const user = await pgDb.getUser(email);
 
     if (!user) {
       return res.status(404).json({ error: 'Usuario no encontrado' });
     }
 
     // Reset password
-    db.users[email].password = newPassword;
-    await writeDB(db);
+    await pgDb.updateUserPassword(email, newPassword);
 
     res.json({
       success: true,
@@ -1310,8 +1417,8 @@ app.post('/api/admin/reset-password', async (req, res) => {
 // ============ USER MANAGEMENT - Get all users (admin only) ============
 app.get('/api/users', async (req, res) => {
   try {
-    const db = await readDB();
-    const userList = Object.values(db.users).map(u => ({
+    const users = await pgDb.getUsers();
+    const userList = Object.values(users).map(u => ({
       email: u.email,
       fullName: u.fullName,
       role: u.role || 'admin',
@@ -1323,6 +1430,7 @@ app.get('/api/users', async (req, res) => {
       users: userList
     });
   } catch (error) {
+    console.error('Get users error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1337,11 +1445,11 @@ app.get('/api/admin/users-with-passwords', async (req, res) => {
       return res.status(403).json({ error: 'Acceso denegado. Solo administradores.' });
     }
 
-    const db = await readDB();
-    const userList = Object.values(db.users).map(u => ({
+    const users = await pgDb.getUsers();
+    const userList = Object.values(users).map(u => ({
       email: u.email,
       fullName: u.fullName,
-      password: u.password, // Include password for admin
+      password: u.password,
       role: u.role || 'admin',
       createdAt: u.createdAt
     }));
@@ -1373,16 +1481,14 @@ app.post('/api/users/update-role', async (req, res) => {
       return res.status(400).json({ error: 'Rol inválido. Debe ser "admin" o "collaborator"' });
     }
 
-    const db = await readDB();
-    const user = db.users[email];
+    const user = await pgDb.getUser(email);
 
     if (!user) {
       return res.status(404).json({ error: 'Usuario no encontrado' });
     }
 
     // Update role
-    db.users[email].role = role;
-    await writeDB(db);
+    await pgDb.updateUserRole(email, role);
 
     res.json({
       success: true,
@@ -1402,8 +1508,8 @@ app.post('/api/users/update-role', async (req, res) => {
 // ============ DEBUG ENDPOINT - Check all users ============
 app.get('/api/debug/users', async (req, res) => {
   try {
-    const db = await readDB();
-    const userList = Object.values(db.users).map(u => ({
+    const users = await pgDb.getUsers();
+    const userList = Object.values(users).map(u => ({
       email: u.email,
       fullName: u.fullName,
       role: u.role || 'admin',
@@ -1423,8 +1529,7 @@ app.get('/api/debug/users', async (req, res) => {
 app.get('/api/debug/user/:email', async (req, res) => {
   try {
     const email = req.params.email;
-    const db = await readDB();
-    const user = db.users[email];
+    const user = await pgDb.getUser(email);
 
     if (!user) {
       return res.status(404).json({ error: 'Usuario no encontrado' });
@@ -1445,8 +1550,7 @@ app.get('/api/debug/user/:email', async (req, res) => {
 app.get('/api/debug/tokens/:userId', async (req, res) => {
   try {
     const userId = req.params.userId;
-    const db = await readDB();
-    const tokens = db.tokens[userId] || {};
+    const tokens = await pgDb.getTokens(userId);
 
     res.json({
       userId,
@@ -1467,15 +1571,35 @@ app.get('/api/debug/tokens/:userId', async (req, res) => {
 cron.schedule('* * * * *', async () => {
   // Runs every minute
   try {
-    const db = await readDB();
-
     // Get current time in Lima, Peru timezone (UTC-5)
     const now = new Date();
     const limaTime = new Date(now.toLocaleString('en-US', { timeZone: 'America/Lima' }));
 
-    for (const post of db.posts) {
-      // CRITICAL: Only publish posts that are scheduled AND approved (or have no approval workflow)
-      if (post.status !== 'scheduled') continue;
+    // Direct query - ONLY get scheduled posts (no full DB load!)
+    const result = await pgDb.pool.query(
+      `SELECT * FROM posts
+       WHERE status = 'scheduled'
+       AND deleted_at IS NULL
+       ORDER BY schedule_date, schedule_time`
+    );
+
+    for (const row of result.rows) {
+      const post = {
+        id: row.id,
+        userId: row.user_id,
+        caption: row.caption,
+        media: row.media,
+        mediaUrl: row.media_url,
+        platforms: {
+          facebook: row.platforms_facebook,
+          linkedin: row.platforms_linkedin
+        },
+        linkedInOrganizationId: row.linkedin_organization_id,
+        scheduleDate: row.schedule_date,
+        scheduleTime: row.schedule_time,
+        status: row.status,
+        approvalStatus: row.approval_status
+      };
 
       // Skip rejected posts - they should NEVER be published
       if (post.approvalStatus?.approved === false) {
@@ -1488,16 +1612,25 @@ cron.schedule('* * * * *', async () => {
         console.log(`⚠️ Skipping non-approved post: ${post.id}`);
         continue;
       }
-      
+
       // Parse the scheduled time in Lima timezone
       const scheduledDateTime = new Date(`${post.scheduleDate}T${post.scheduleTime}`);
-      
+
       if (scheduledDateTime <= limaTime) {
-        console.log(`Publishing scheduled post: ${post.id}`);
-        
+        console.log(`📅 Publishing scheduled post: ${post.id}`);
+
         try {
+          // If we have mediaUrl, download as base64 for posting
+          if (post.mediaUrl && !post.media) {
+            try {
+              post.media = await storage.downloadMediaAsBase64(post.mediaUrl);
+            } catch (err) {
+              console.warn(`⚠️ Could not download media for post ${post.id}:`, err.message);
+            }
+          }
+
           const results = {};
-          
+
           if (post.platforms.facebook) {
             results.facebook = await postToFacebook(post.userId, post);
           }
@@ -1505,32 +1638,38 @@ cron.schedule('* * * * *', async () => {
           if (post.platforms.linkedin) {
             results.linkedin = await postToLinkedIn(post.userId, post, post.linkedInOrganizationId);
           }
-          
-          // Update post status
-          post.status = 'published';
-          post.publishedAt = limaTime.toISOString();
-          post.results = results;
-          
-          await writeDB(db);
-          console.log(`Successfully published post ${post.id}`);
+
+          // Update post status - ONLY this post
+          await pgDb.updatePost(post.id, {
+            status: 'published',
+            publishedAt: limaTime.toISOString(),
+            results: results
+          });
+
+          console.log(`✅ Successfully published post ${post.id}`);
         } catch (error) {
-          console.error(`Failed to publish post ${post.id}:`, error.message);
-          post.status = 'failed';
-          post.error = error.message;
-          await writeDB(db);
+          console.error(`❌ Failed to publish post ${post.id}:`, error.message);
+          await pgDb.updatePost(post.id, {
+            status: 'failed'
+          });
         }
       }
     }
   } catch (error) {
-    console.error('Cron job error:', error);
+    console.error('❌ Cron job error:', error);
   }
 });
 
 // ============ START SERVER ============
-initDB().then(() => {
+pgDb.initDB().then(() => {
+  // Initialize Supabase Storage
+  const storageReady = storage.initStorage();
+
   app.listen(PORT, () => {
     console.log(`🚀 Social Planner API running on port ${PORT}`);
-    console.log(`📊 Database: ${usePostgres ? 'PostgreSQL (Supabase) ✅' : 'JSON (fallback) ⚠️'}`);
+    console.log(`📊 Database: PostgreSQL (Supabase) ✅`);
+    console.log(`📦 Storage: ${storageReady ? 'Supabase Storage ✅' : 'Disabled ⚠️'}`);
+    console.log(`🛡️  Rate Limiting: 60 req/min ✅`);
     console.log(`🔵 Facebook OAuth: http://localhost:${PORT}/auth/facebook`);
     console.log(`🔵 LinkedIn OAuth: http://localhost:${PORT}/auth/linkedin`);
   });
