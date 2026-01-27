@@ -48,9 +48,16 @@ async function migrate() {
       ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP DEFAULT NULL;
     `);
 
+    // Add linkedin_organization_id column if it doesn't exist
+    await pool.query(`
+      ALTER TABLE posts
+      ADD COLUMN IF NOT EXISTS linkedin_organization_id VARCHAR(255);
+    `);
+
     console.log('✅ Migration completed successfully');
     console.log('✅ Added media_url column to posts table');
     console.log('✅ Added deleted_at column to posts table');
+    console.log('✅ Added linkedin_organization_id column to posts table');
 
   } catch (error) {
     console.error('❌ Migration failed:', error);
