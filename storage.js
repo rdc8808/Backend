@@ -27,8 +27,7 @@ function initStorage() {
  */
 async function uploadMedia(base64Data, userId = 'default') {
   if (!supabase) {
-    console.warn('⚠️ Supabase Storage not initialized, skipping upload');
-    return null; // Return null, caller will use base64 instead
+    throw new Error('Supabase Storage not initialized');
   }
 
   try {
@@ -41,15 +40,6 @@ async function uploadMedia(base64Data, userId = 'default') {
     const mimeType = matches[1];
     const base64Content = matches[2];
     const buffer = Buffer.from(base64Content, 'base64');
-
-    const fileSizeMB = (buffer.length / 1024 / 1024).toFixed(2);
-    console.log(`📤 Uploading ${fileSizeMB} MB file (${mimeType})`);
-
-    // Supabase free tier has 1GB storage, 2GB bandwidth
-    // But individual file upload limit is typically 50MB
-    if (buffer.length > 50 * 1024 * 1024) {
-      throw new Error(`File too large: ${fileSizeMB} MB (max 50 MB)`);
-    }
 
     // Determine file extension
     const extension = mimeType.split('/')[1].split(';')[0];
@@ -68,12 +58,7 @@ async function uploadMedia(base64Data, userId = 'default') {
       });
 
     if (error) {
-      console.error('❌ Supabase upload error:', {
-        message: error.message,
-        statusCode: error.statusCode,
-        error: error.error,
-        details: error
-      });
+      console.error('❌ Supabase upload error:', error);
       throw new Error(`Upload failed: ${error.message}`);
     }
 
