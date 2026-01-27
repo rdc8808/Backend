@@ -15,6 +15,9 @@ const pgDb = require('./database-pg');
 // Import Supabase Storage
 const storage = require('./storage');
 
+// Import health monitoring
+const healthCheck = require('./health-check');
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -50,6 +53,18 @@ app.get('/', (req, res) => {
       </body>
     </html>
   `);
+});
+
+// Health check endpoint for monitoring
+app.get('/health', (req, res) => {
+  const stats = healthCheck.getHealthStats();
+  const isHealthy = healthCheck.checkMemoryHealth();
+
+  res.status(isHealthy ? 200 : 503).json({
+    status: isHealthy ? 'healthy' : 'degraded',
+    timestamp: new Date().toISOString(),
+    ...stats
+  });
 });
 
 // robots.txt to allow Facebook crawler
@@ -1672,6 +1687,11 @@ pgDb.initDB().then(() => {
     console.log(`🛡️  Rate Limiting: 60 req/min ✅`);
     console.log(`🔵 Facebook OAuth: http://localhost:${PORT}/auth/facebook`);
     console.log(`🔵 LinkedIn OAuth: http://localhost:${PORT}/auth/linkedin`);
+
+    // Start health monitoring
+    healthCheck.startHealthMonitoring();
+    const initialStats = healthCheck.getHealthStats();
+    console.log(`💚 Health monitoring active (Initial: RSS=${initialStats.memory.rss}MB)`);
   });
 }).catch(err => {
   console.error('❌ Failed to start server:', err);
