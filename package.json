@@ -4,7 +4,7 @@
   "description": "Social media scheduling backend",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
+    "start": "bash deploy.sh",
     "dev": "nodemon server.js"
   },
   "dependencies": {
