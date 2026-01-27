@@ -18,6 +18,25 @@ const storage = require('./storage');
 // Import health monitoring
 const healthCheck = require('./health-check');
 
+// Helper function for uploading media with fallback
+async function uploadMediaWithFallback(base64Data, userId, operation = 'upload') {
+  if (!base64Data) return null;
+
+  try {
+    const mediaUrl = await storage.uploadMedia(base64Data, userId);
+    if (mediaUrl) {
+      console.log(`✅ Media uploaded for ${operation}: ${mediaUrl}`);
+      return mediaUrl;
+    } else {
+      console.warn(`⚠️ Storage upload returned null for ${operation}, using base64 fallback`);
+      return null;
+    }
+  } catch (uploadError) {
+    console.error(`❌ Media upload failed for ${operation}, using base64 fallback:`, uploadError.message);
+    return null;
+  }
+}
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -863,22 +882,14 @@ app.post('/api/drafts', async (req, res) => {
 
     const postId = postData.id || Date.now().toString();
 
-    // Upload media to Supabase Storage if exists
-    let mediaUrl = null;
-    if (postData.media) {
-      try {
-        mediaUrl = await storage.uploadMedia(postData.media, userId);
-        console.log(`✅ Media uploaded for draft ${postId}: ${mediaUrl}`);
-      } catch (uploadError) {
-        console.error('❌ Media upload failed:', uploadError);
-        return res.status(500).json({ error: 'Error al subir la imagen/video' });
-      }
-    }
+    // Upload media to Supabase Storage (with fallback to base64)
+    const mediaUrl = await uploadMediaWithFallback(postData.media, userId, 'draft');
 
     const post = {
       id: postId,
       userId: userId || 'default_user',
       caption: postData.caption,
+      media: mediaUrl ? null : postData.media, // Store base64 only if storage failed
       mediaUrl: mediaUrl,
       platforms: postData.platforms,
       linkedInOrganizationId: postData.linkedInOrganizationId,
@@ -918,17 +929,8 @@ app.post('/api/posts/send-for-approval', async (req, res) => {
 
     const postId = postData.id || Date.now().toString();
 
-    // Upload media to Supabase Storage if exists
-    let mediaUrl = null;
-    if (postData.media) {
-      try {
-        mediaUrl = await storage.uploadMedia(postData.media, userId);
-        console.log(`✅ Media uploaded for approval ${postId}: ${mediaUrl}`);
-      } catch (uploadError) {
-        console.error('❌ Media upload failed:', uploadError);
-        return res.status(500).json({ error: 'Error al subir la imagen/video' });
-      }
-    }
+    // Upload media to Supabase Storage (with fallback to base64)
+    const mediaUrl = await uploadMediaWithFallback(postData.media, userId, 'approval');
 
     const post = {
       id: postId,
@@ -1175,17 +1177,8 @@ app.post('/api/schedule', async (req, res) => {
 
     const postId = postData.id || Date.now().toString();
 
-    // Upload media to Supabase Storage if exists
-    let mediaUrl = null;
-    if (postData.media) {
-      try {
-        mediaUrl = await storage.uploadMedia(postData.media, userId);
-        console.log(`✅ Media uploaded for schedule ${postId}: ${mediaUrl}`);
-      } catch (uploadError) {
-        console.error('❌ Media upload failed:', uploadError);
-        return res.status(500).json({ error: 'Error al subir la imagen/video' });
-      }
-    }
+    // Upload media to Supabase Storage (with fallback to base64)
+    const mediaUrl = await uploadMediaWithFallback(postData.media, userId, 'schedule');
 
     const post = {
       id: postId,
@@ -1225,16 +1218,8 @@ app.post('/api/post-now', async (req, res) => {
     const postId = postData.id || Date.now().toString();
 
     // Upload media to Supabase Storage if exists
-    let mediaUrl = null;
-    if (postData.media) {
-      try {
-        mediaUrl = await storage.uploadMedia(postData.media, userId);
-        console.log(`✅ Media uploaded for post-now ${postId}: ${mediaUrl}`);
-      } catch (uploadError) {
-        console.error('❌ Media upload failed:', uploadError);
-        return res.status(500).json({ error: 'Error al subir la imagen/video' });
-      }
-    }
+    // Upload media to Supabase Storage (with fallback to base64)
+    const mediaUrl = await uploadMediaWithFallback(postData.media, userId, 'post-now');
 
     // For posting, we need base64 (Facebook/LinkedIn APIs require it)
     // If we have mediaUrl, download it back as base64
