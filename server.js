@@ -773,9 +773,6 @@ async function postToLinkedIn(userId, postData) {
     },
     visibility: {
       'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC'
-    },
-    distribution: {
-      feedDistribution: 'MAIN_FEED'
     }
   };
 
