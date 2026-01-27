@@ -733,20 +733,28 @@ async function postToFacebook(userId, postData) {
 }
 
 // ============ POST TO LINKEDIN ============
-async function postToLinkedIn(userId, postData) {
+async function postToLinkedIn(userId, postData, organizationId = null) {
   const db = await readDB();
   // Use APP-LEVEL tokens (shared by all users)
   const liToken = db.tokens['app']?.linkedin;
 
   if (!liToken) throw new Error('LinkedIn no está conectado');
 
-  // Use organization (company page) instead of personal profile
-  if (!liToken.organizations || liToken.organizations.length === 0) {
-    throw new Error('No se encontraron páginas de LinkedIn. Por favor, reconecta tu cuenta de LinkedIn.');
+  // Find specific organization or use first as fallback
+  let organization;
+  if (organizationId) {
+    organization = liToken.organizations.find(org => org.id === organizationId);
+    if (!organization) {
+      throw new Error(`Organización LinkedIn no encontrada: ${organizationId}`);
+    }
+  } else {
+    // Fallback to first organization if none specified
+    if (!liToken.organizations || liToken.organizations.length === 0) {
+      throw new Error('No se encontraron páginas de LinkedIn. Por favor, reconecta tu cuenta de LinkedIn.');
+    }
+    organization = liToken.organizations[0];
   }
 
-  // Use first organization (company page)
-  const organization = liToken.organizations[0];
   const organizationURN = `urn:li:organization:${organization.id}`;
 
   // Detect media type
@@ -1116,7 +1124,7 @@ app.post('/api/post-now', async (req, res) => {
     }
 
     if (postData.platforms.linkedin) {
-      results.linkedin = await postToLinkedIn(userId || 'default_user', postData);
+      results.linkedin = await postToLinkedIn(userId || 'default_user', postData, postData.linkedInOrganizationId);
     }
 
     // Save to database as published
@@ -1218,7 +1226,7 @@ app.get('/api/connections', async (req, res) => {
     res.json({
       facebook: !!appTokens.facebook,
       linkedin: !!appTokens.linkedin,
-      linkedinOrganization: appTokens.linkedin?.organizations?.[0] || null, // First organization
+      linkedinOrganizations: appTokens.linkedin?.organizations || [], // Return full array
       instagram: false // We'll add this later if needed
     });
   } catch (error) {
@@ -1493,9 +1501,9 @@ cron.schedule('* * * * *', async () => {
           if (post.platforms.facebook) {
             results.facebook = await postToFacebook(post.userId, post);
           }
-          
+
           if (post.platforms.linkedin) {
-            results.linkedin = await postToLinkedIn(post.userId, post);
+            results.linkedin = await postToLinkedIn(post.userId, post, post.linkedInOrganizationId);
           }
           
           // Update post status

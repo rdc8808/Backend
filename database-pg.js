@@ -54,6 +54,7 @@ async function initDB() {
         media TEXT,
         platforms_facebook BOOLEAN DEFAULT false,
         platforms_linkedin BOOLEAN DEFAULT false,
+        linkedin_organization_id VARCHAR(255),
         schedule_date VARCHAR(50),
         schedule_time VARCHAR(50),
         status VARCHAR(50) DEFAULT 'draft',
@@ -161,6 +162,7 @@ async function getPosts(userId = null) {
       facebook: row.platforms_facebook,
       linkedin: row.platforms_linkedin
     },
+    linkedInOrganizationId: row.linkedin_organization_id,
     scheduleDate: row.schedule_date,
     scheduleTime: row.schedule_time,
     status: row.status,
@@ -186,6 +188,7 @@ async function getPost(id) {
       facebook: row.platforms_facebook,
       linkedin: row.platforms_linkedin
     },
+    linkedInOrganizationId: row.linkedin_organization_id,
     scheduleDate: row.schedule_date,
     scheduleTime: row.schedule_time,
     status: row.status,
@@ -201,10 +204,10 @@ async function createPost(post) {
   await pool.query(
     `INSERT INTO posts (
       id, user_id, caption, media,
-      platforms_facebook, platforms_linkedin,
+      platforms_facebook, platforms_linkedin, linkedin_organization_id,
       schedule_date, schedule_time, status, approval_status,
       created_at, updated_at
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
     [
       post.id,
       post.userId,
@@ -212,6 +215,7 @@ async function createPost(post) {
       post.media,
       post.platforms?.facebook || false,
       post.platforms?.linkedin || false,
+      post.linkedInOrganizationId || null,
       post.scheduleDate,
       post.scheduleTime,
       post.status,
@@ -244,6 +248,10 @@ async function updatePost(id, updates) {
       setClauses.push(`platforms_linkedin = $${paramCount++}`);
       values.push(updates.platforms.linkedin);
     }
+  }
+  if (updates.linkedInOrganizationId !== undefined) {
+    setClauses.push(`linkedin_organization_id = $${paramCount++}`);
+    values.push(updates.linkedInOrganizationId);
   }
   if (updates.scheduleDate !== undefined) {
     setClauses.push(`schedule_date = $${paramCount++}`);
