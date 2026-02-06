@@ -1989,13 +1989,35 @@ cron.schedule('* * * * *', async () => {
         console.log(`📅 Publishing scheduled post: ${post.id}`);
 
         try {
-          // If we have mediaUrl, download as base64 for posting
-          if (post.mediaUrl && !post.media) {
+          // Load media items from post_media table
+          const mediaItems = await pgDb.getPostMedia(post.id);
+
+          // Download media as base64 for social APIs
+          const mediaItemsWithBase64 = [];
+          for (const item of mediaItems) {
+            try {
+              const base64 = await storage.downloadMediaAsBase64(item.url);
+              mediaItemsWithBase64.push({ ...item, base64Data: base64 });
+            } catch (err) {
+              console.warn(`⚠️ Could not download media ${item.url}:`, err.message);
+            }
+          }
+
+          // Also handle legacy single media
+          if (mediaItemsWithBase64.length === 0 && post.mediaUrl && !post.media) {
             try {
               post.media = await storage.downloadMediaAsBase64(post.mediaUrl);
             } catch (err) {
               console.warn(`⚠️ Could not download media for post ${post.id}:`, err.message);
             }
+          }
+
+          // Add mediaItems to post object
+          post.mediaItems = mediaItemsWithBase64;
+
+          // For backwards compatibility, set single media from first item
+          if (mediaItemsWithBase64.length > 0 && !post.media) {
+            post.media = mediaItemsWithBase64[0].base64Data;
           }
 
           const results = {};
