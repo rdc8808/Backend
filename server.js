@@ -835,9 +835,11 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
 
   // Get media items (new format) or fall back to single media (legacy)
   const mediaItems = postData.mediaItems || [];
+  console.log(`🔵 LinkedIn postToLinkedIn received ${mediaItems.length} mediaItems:`, mediaItems.map(m => ({ type: m.type, hasBase64: !!m.base64Data })));
   const images = mediaItems.filter(m => m.type === 'image' && m.base64Data);
   const videos = mediaItems.filter(m => m.type === 'video' && m.base64Data);
   const pdfs = mediaItems.filter(m => m.type === 'pdf' && m.base64Data);
+  console.log(`🔵 LinkedIn detected: ${images.length} images, ${videos.length} videos, ${pdfs.length} PDFs`);
 
   // Helper function to upload a single media to LinkedIn
   async function uploadLinkedInMedia(base64Data, recipe) {
@@ -1991,6 +1993,7 @@ cron.schedule('* * * * *', async () => {
         try {
           // Load media items from post_media table
           const mediaItems = await pgDb.getPostMedia(post.id);
+          console.log(`📎 Post ${post.id} has ${mediaItems.length} media items from DB:`, mediaItems.map(m => ({ type: m.type, url: m.url?.substring(0, 50) })));
 
           // Download media as base64 for social APIs
           const mediaItemsWithBase64 = [];
@@ -2014,6 +2017,7 @@ cron.schedule('* * * * *', async () => {
 
           // Add mediaItems to post object
           post.mediaItems = mediaItemsWithBase64;
+          console.log(`📎 Post ${post.id} mediaItemsWithBase64:`, mediaItemsWithBase64.map(m => ({ type: m.type, hasBase64: !!m.base64Data })));
 
           // For backwards compatibility, set single media from first item
           if (mediaItemsWithBase64.length > 0 && !post.media) {
