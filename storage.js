@@ -41,8 +41,12 @@ async function uploadMedia(base64Data, userId = 'default') {
     const base64Content = matches[2];
     const buffer = Buffer.from(base64Content, 'base64');
 
-    // Determine file extension
-    const extension = mimeType.split('/')[1].split(';')[0];
+    // Determine file extension (with PDF support)
+    let extension = mimeType.split('/')[1].split(';')[0];
+    // Handle special cases
+    if (mimeType === 'application/pdf') {
+      extension = 'pdf';
+    }
 
     // Generate unique filename
     const timestamp = Date.now();
@@ -160,10 +164,76 @@ async function cleanupOldMedia(olderThanMonths = 3) {
   console.log(`🧹 Cleanup triggered for media older than ${olderThanMonths} months`);
 }
 
+/**
+ * Upload multiple media files to Supabase Storage
+ * @param {Array} mediaItems - Array of { base64Data, type, fileName, mimeType, fileSize }
+ * @param {string} userId - User ID for organizing files
+ * @returns {Promise<Array>} - Array of uploaded file info with URLs
+ */
+async function uploadMultipleMedia(mediaItems, userId = 'default') {
+  if (!supabase) {
+    throw new Error('Supabase Storage not initialized');
+  }
+
+  const results = [];
+  for (const item of mediaItems) {
+    try {
+      const url = await uploadMedia(item.base64Data, userId);
+      results.push({
+        url,
+        type: item.type || 'image',
+        fileName: item.fileName || null,
+        mimeType: item.mimeType || null,
+        fileSize: item.fileSize || null
+      });
+    } catch (error) {
+      console.error(`❌ Failed to upload ${item.fileName}:`, error.message);
+      // Continue with other files, don't fail completely
+      results.push({
+        error: error.message,
+        type: item.type,
+        fileName: item.fileName
+      });
+    }
+  }
+
+  const successCount = results.filter(r => r.url).length;
+  console.log(`✅ Uploaded ${successCount}/${mediaItems.length} media files`);
+  return results;
+}
+
+/**
+ * Delete multiple media files from Supabase Storage
+ * @param {Array} mediaUrls - Array of public URLs to delete
+ * @returns {Promise<Array>} - Array of deletion results
+ */
+async function deleteMultipleMedia(mediaUrls) {
+  if (!supabase) {
+    throw new Error('Supabase Storage not initialized');
+  }
+
+  const results = [];
+  for (const url of mediaUrls) {
+    try {
+      await deleteMedia(url);
+      results.push({ url, success: true });
+    } catch (error) {
+      console.error(`❌ Failed to delete ${url}:`, error.message);
+      results.push({ url, success: false, error: error.message });
+    }
+  }
+
+  const successCount = results.filter(r => r.success).length;
+  console.log(`🗑️ Deleted ${successCount}/${mediaUrls.length} media files`);
+  return results;
+}
+
 module.exports = {
   initStorage,
   uploadMedia,
   downloadMediaAsBase64,
   deleteMedia,
-  cleanupOldMedia
+  cleanupOldMedia,
+  uploadMultipleMedia,
+  deleteMultipleMedia
 };

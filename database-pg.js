@@ -78,6 +78,26 @@ async function initDB() {
       )
     `);
 
+    // Create post_media table for multiple media support
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS post_media (
+        id SERIAL PRIMARY KEY,
+        post_id VARCHAR(255) NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+        media_url TEXT NOT NULL,
+        media_type VARCHAR(50) NOT NULL,
+        file_name VARCHAR(255),
+        file_size INTEGER,
+        mime_type VARCHAR(100),
+        sort_order INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Create index for post_media
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_post_media_post_id ON post_media(post_id)
+    `);
+
     console.log('✅ PostgreSQL database initialized successfully');
   } catch (error) {
     console.error('❌ Database initialization error:', error);
@@ -409,6 +429,121 @@ async function deleteTokens(userId, platform = null) {
   }
 }
 
+// Post Media operations (multiple media support)
+async function createPostMedia(postId, mediaItems) {
+  if (!mediaItems || mediaItems.length === 0) return [];
+
+  const insertedItems = [];
+  for (let i = 0; i < mediaItems.length; i++) {
+    const item = mediaItems[i];
+    const result = await pool.query(
+      `INSERT INTO post_media (post_id, media_url, media_type, file_name, file_size, mime_type, sort_order)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [postId, item.url, item.type, item.fileName || null, item.fileSize || null, item.mimeType || null, i]
+    );
+    insertedItems.push(result.rows[0]);
+  }
+  return insertedItems;
+}
+
+async function getPostMedia(postId) {
+  const result = await pool.query(
+    'SELECT * FROM post_media WHERE post_id = $1 ORDER BY sort_order ASC',
+    [postId]
+  );
+  return result.rows.map(row => ({
+    id: row.id,
+    postId: row.post_id,
+    url: row.media_url,
+    type: row.media_type,
+    fileName: row.file_name,
+    fileSize: row.file_size,
+    mimeType: row.mime_type,
+    sortOrder: row.sort_order,
+    createdAt: row.created_at
+  }));
+}
+
+async function deletePostMedia(postId) {
+  const result = await pool.query(
+    'DELETE FROM post_media WHERE post_id = $1 RETURNING media_url',
+    [postId]
+  );
+  return result.rows.map(row => row.media_url);
+}
+
+async function updatePostMedia(postId, mediaItems) {
+  // Delete existing media for this post
+  await deletePostMedia(postId);
+  // Insert new media items
+  return createPostMedia(postId, mediaItems);
+}
+
+// Get posts with media items
+async function getPostsWithMedia(userId = null, includeDeleted = false) {
+  const posts = await getPosts(userId, includeDeleted);
+
+  // Get media for all posts
+  for (const post of posts) {
+    post.mediaItems = await getPostMedia(post.id);
+    // Backwards compatibility: if no mediaItems but has mediaUrl, create mediaItems array
+    if (post.mediaItems.length === 0 && post.mediaUrl) {
+      post.mediaItems = [{
+        url: post.mediaUrl,
+        type: post.mediaUrl.includes('.mp4') || post.mediaUrl.includes('.mov') ? 'video' : 'image'
+      }];
+    }
+  }
+
+  return posts;
+}
+
+async function getPostWithMedia(id, includeDeleted = false) {
+  const post = await getPost(id, includeDeleted);
+  if (!post) return null;
+
+  post.mediaItems = await getPostMedia(id);
+  // Backwards compatibility
+  if (post.mediaItems.length === 0 && post.mediaUrl) {
+    post.mediaItems = [{
+      url: post.mediaUrl,
+      type: post.mediaUrl.includes('.mp4') || post.mediaUrl.includes('.mov') ? 'video' : 'image'
+    }];
+  }
+
+  return post;
+}
+
+// Migration function to move existing media_url to post_media table
+async function migrateExistingMedia() {
+  console.log('🔄 Migrating existing media to post_media table...');
+
+  const result = await pool.query(
+    'SELECT id, media_url FROM posts WHERE media_url IS NOT NULL AND deleted_at IS NULL'
+  );
+
+  let migrated = 0;
+  for (const row of result.rows) {
+    // Check if already migrated
+    const existing = await pool.query(
+      'SELECT id FROM post_media WHERE post_id = $1',
+      [row.id]
+    );
+
+    if (existing.rows.length === 0 && row.media_url) {
+      const type = row.media_url.includes('.mp4') || row.media_url.includes('.mov') ? 'video' : 'image';
+      await pool.query(
+        'INSERT INTO post_media (post_id, media_url, media_type, sort_order) VALUES ($1, $2, $3, 0)',
+        [row.id, row.media_url, type]
+      );
+      migrated++;
+    }
+  }
+
+  console.log(`✅ Migrated ${migrated} posts to new media structure`);
+  return migrated;
+}
+
 module.exports = {
   initDB,
   getUsers,
@@ -428,5 +563,13 @@ module.exports = {
   getAllTokens,
   saveTokens,
   deleteTokens,
+  // New multi-media functions
+  createPostMedia,
+  getPostMedia,
+  deletePostMedia,
+  updatePostMedia,
+  getPostsWithMedia,
+  getPostWithMedia,
+  migrateExistingMedia,
   pool
 };

@@ -664,17 +664,89 @@ async function postToFacebook(userId, postData) {
   const pageToken = fbToken.pages[0].access_token; // Use first page
   const pageId = fbToken.pages[0].id;
 
-  const postParams = {
-    message: postData.caption,
-    access_token: pageToken
-  };
+  // Get media items (new format) or fall back to single media (legacy)
+  const mediaItems = postData.mediaItems || [];
+  const images = mediaItems.filter(m => m.type === 'image' && m.base64Data);
+  const videos = mediaItems.filter(m => m.type === 'video' && m.base64Data);
+  const pdfs = mediaItems.filter(m => m.type === 'pdf');
 
-  // Upload media if exists
-  if (postData.media) {
-    const mediaBuffer = Buffer.from(postData.media.split(',')[1], 'base64');
+  // Warn about PDFs - Facebook doesn't support them
+  if (pdfs.length > 0) {
+    console.warn('⚠️ Facebook does not support PDF uploads, skipping PDFs');
+  }
 
-    // Detect media type from base64 header
-    const mediaType = postData.media.split(';')[0].split(':')[1];
+  // MULTI-IMAGE POST (2+ images)
+  if (images.length > 1) {
+    console.log(`📸 Uploading ${images.length} images to Facebook as multi-image post`);
+    const attachedMedia = [];
+
+    for (const img of images) {
+      const mediaBuffer = Buffer.from(img.base64Data.split(',')[1], 'base64');
+      const tempFile = path.join('uploads', `temp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}.jpg`);
+
+      await fs.writeFile(tempFile, mediaBuffer);
+
+      const form = new FormData();
+      form.append('source', await fs.readFile(tempFile), {
+        filename: 'image.jpg',
+        contentType: img.mimeType || 'image/jpeg'
+      });
+      form.append('access_token', pageToken);
+      form.append('published', 'false'); // Upload as unpublished
+
+      try {
+        const uploadResponse = await axios.post(
+          `https://graph.facebook.com/v18.0/${pageId}/photos`,
+          form,
+          {
+            headers: form.getHeaders(),
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity
+          }
+        );
+
+        attachedMedia.push({ media_fbid: uploadResponse.data.id });
+        await fs.unlink(tempFile);
+        console.log(`✅ Uploaded image ${attachedMedia.length}/${images.length}`);
+      } catch (error) {
+        await fs.unlink(tempFile).catch(() => {});
+        console.error('❌ Failed to upload image:', error.response?.data || error.message);
+        throw new Error(`Facebook image upload failed: ${error.response?.data?.error?.message || error.message}`);
+      }
+    }
+
+    // Create post with all attached media
+    try {
+      const response = await axios.post(
+        `https://graph.facebook.com/v18.0/${pageId}/feed`,
+        {
+          message: postData.caption,
+          attached_media: attachedMedia,
+          access_token: pageToken
+        }
+      );
+      console.log(`✅ Facebook multi-image post created with ${attachedMedia.length} images`);
+      return response.data;
+    } catch (error) {
+      console.error('❌ Facebook multi-image post error:', error.response?.data);
+      throw new Error(`Facebook multi-image post failed: ${error.response?.data?.error?.message || error.message}`);
+    }
+  }
+
+  // SINGLE IMAGE/VIDEO (legacy behavior)
+  // Use first image, or first video, or legacy single media
+  let singleMedia = null;
+  if (images.length === 1) {
+    singleMedia = images[0].base64Data;
+  } else if (videos.length > 0) {
+    singleMedia = videos[0].base64Data;
+  } else if (postData.media) {
+    singleMedia = postData.media;
+  }
+
+  if (singleMedia) {
+    const mediaBuffer = Buffer.from(singleMedia.split(',')[1], 'base64');
+    const mediaType = singleMedia.split(';')[0].split(':')[1];
     const isVideo = mediaType.startsWith('video/');
     const extension = isVideo ? 'mp4' : 'jpg';
     const tempFile = path.join('uploads', `temp_${Date.now()}.${extension}`);
@@ -682,7 +754,7 @@ async function postToFacebook(userId, postData) {
     await fs.writeFile(tempFile, mediaBuffer);
 
     const form = new FormData();
-    form.append('source', (await fs.readFile(tempFile)), {
+    form.append('source', await fs.readFile(tempFile), {
       filename: `media.${extension}`,
       contentType: mediaType
     });
@@ -704,7 +776,7 @@ async function postToFacebook(userId, postData) {
       await fs.unlink(tempFile);
       return uploadResponse.data;
     } catch (error) {
-      await fs.unlink(tempFile).catch(() => {}); // Clean up file even on error
+      await fs.unlink(tempFile).catch(() => {});
       console.error(`Facebook ${isVideo ? 'video' : 'photo'} upload error:`, JSON.stringify(error.response?.data, null, 2));
       throw new Error(`Facebook ${isVideo ? 'video' : 'photo'} upload failed: ${error.response?.data?.error?.message || error.message}`);
     }
@@ -714,11 +786,13 @@ async function postToFacebook(userId, postData) {
   try {
     const response = await axios.post(
       `https://graph.facebook.com/v18.0/${pageId}/feed`,
-      postParams
+      {
+        message: postData.caption,
+        access_token: pageToken
+      }
     );
     return response.data;
   } catch (error) {
-    // Log FULL detailed error for debugging
     console.error('Facebook API Error - Full Details:');
     console.error('Status:', error.response?.status);
     console.error('Error Data:', JSON.stringify(error.response?.data, null, 2));
@@ -759,11 +833,199 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
 
   const organizationURN = `urn:li:organization:${organization.id}`;
 
-  // Detect media type
+  // Get media items (new format) or fall back to single media (legacy)
+  const mediaItems = postData.mediaItems || [];
+  const images = mediaItems.filter(m => m.type === 'image' && m.base64Data);
+  const videos = mediaItems.filter(m => m.type === 'video' && m.base64Data);
+  const pdfs = mediaItems.filter(m => m.type === 'pdf' && m.base64Data);
+
+  // Helper function to upload a single media to LinkedIn
+  async function uploadLinkedInMedia(base64Data, recipe) {
+    const mediaBuffer = Buffer.from(base64Data.split(',')[1], 'base64');
+
+    const registerResponse = await axios.post(
+      'https://api.linkedin.com/v2/assets?action=registerUpload',
+      {
+        registerUploadRequest: {
+          recipes: [recipe],
+          owner: organizationURN,
+          serviceRelationships: [{
+            relationshipType: 'OWNER',
+            identifier: 'urn:li:userGeneratedContent'
+          }]
+        }
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${liToken.accessToken}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    const uploadUrl = registerResponse.data.value.uploadMechanism['com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest'].uploadUrl;
+    const asset = registerResponse.data.value.asset;
+
+    await axios.put(uploadUrl, mediaBuffer, {
+      headers: {
+        Authorization: `Bearer ${liToken.accessToken}`,
+        'Content-Type': 'application/octet-stream'
+      },
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity
+    });
+
+    return asset;
+  }
+
+  // PDF DOCUMENT POST (takes priority - LinkedIn documents are special)
+  if (pdfs.length > 0) {
+    console.log(`📄 Uploading PDF document to LinkedIn`);
+    const pdf = pdfs[0]; // LinkedIn only supports 1 document per post
+    const pdfBuffer = Buffer.from(pdf.base64Data.split(',')[1], 'base64');
+
+    try {
+      // Step 1: Initialize document upload
+      const initResponse = await axios.post(
+        'https://api.linkedin.com/rest/documents?action=initializeUpload',
+        {
+          initializeUploadRequest: {
+            owner: organizationURN
+          }
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${liToken.accessToken}`,
+            'Content-Type': 'application/json',
+            'X-Restli-Protocol-Version': '2.0.0',
+            'LinkedIn-Version': '202401'
+          }
+        }
+      );
+
+      const uploadUrl = initResponse.data.value.uploadUrl;
+      const documentUrn = initResponse.data.value.document;
+
+      // Step 2: Upload the PDF binary
+      await axios.put(uploadUrl, pdfBuffer, {
+        headers: {
+          Authorization: `Bearer ${liToken.accessToken}`,
+          'Content-Type': 'application/octet-stream'
+        },
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity
+      });
+
+      // Step 3: Create post with document
+      const documentPostBody = {
+        author: organizationURN,
+        commentary: postData.caption,
+        visibility: 'PUBLIC',
+        distribution: {
+          feedDistribution: 'MAIN_FEED',
+          targetEntities: [],
+          thirdPartyDistributionChannels: []
+        },
+        content: {
+          media: {
+            title: pdf.fileName || 'Documento',
+            id: documentUrn
+          }
+        },
+        lifecycleState: 'PUBLISHED',
+        isReshareDisabledByAuthor: false
+      };
+
+      const response = await axios.post(
+        'https://api.linkedin.com/rest/posts',
+        documentPostBody,
+        {
+          headers: {
+            Authorization: `Bearer ${liToken.accessToken}`,
+            'Content-Type': 'application/json',
+            'X-Restli-Protocol-Version': '2.0.0',
+            'LinkedIn-Version': '202401'
+          }
+        }
+      );
+
+      console.log('✅ LinkedIn PDF document post successful');
+      return response.data;
+    } catch (error) {
+      console.error('❌ LinkedIn PDF upload error:', error.response?.data || error.message);
+      // Fall back to regular post if document API fails
+      console.log('⚠️ Falling back to text-only post');
+    }
+  }
+
+  // MULTI-IMAGE POST (2+ images)
+  if (images.length > 1) {
+    console.log(`📸 Uploading ${images.length} images to LinkedIn as multi-image post`);
+
+    const uploadedAssets = [];
+    for (const img of images) {
+      try {
+        const asset = await uploadLinkedInMedia(img.base64Data, 'urn:li:digitalmediaRecipe:feedshare-image');
+        uploadedAssets.push({ status: 'READY', media: asset });
+        console.log(`✅ Uploaded image ${uploadedAssets.length}/${images.length} to LinkedIn`);
+      } catch (error) {
+        console.error('❌ Failed to upload image to LinkedIn:', error.response?.data || error.message);
+        throw new Error(`LinkedIn image upload failed: ${error.response?.data?.message || error.message}`);
+      }
+    }
+
+    const multiImagePostBody = {
+      author: organizationURN,
+      lifecycleState: 'PUBLISHED',
+      specificContent: {
+        'com.linkedin.ugc.ShareContent': {
+          shareCommentary: {
+            text: postData.caption
+          },
+          shareMediaCategory: 'IMAGE',
+          media: uploadedAssets
+        }
+      },
+      visibility: {
+        'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC'
+      }
+    };
+
+    try {
+      const response = await axios.post(
+        'https://api.linkedin.com/v2/ugcPosts',
+        multiImagePostBody,
+        {
+          headers: {
+            Authorization: `Bearer ${liToken.accessToken}`,
+            'Content-Type': 'application/json',
+            'X-Restli-Protocol-Version': '2.0.0'
+          }
+        }
+      );
+      console.log(`✅ LinkedIn multi-image post created with ${uploadedAssets.length} images`);
+      return response.data;
+    } catch (error) {
+      console.error('❌ LinkedIn multi-image post error:', error.response?.data);
+      throw new Error(`LinkedIn multi-image post failed: ${error.response?.data?.message || error.message}`);
+    }
+  }
+
+  // SINGLE IMAGE/VIDEO (legacy behavior)
+  let singleMedia = null;
   let mediaCategory = 'NONE';
   let recipe = null;
 
-  if (postData.media) {
+  if (images.length === 1) {
+    singleMedia = images[0].base64Data;
+    mediaCategory = 'IMAGE';
+    recipe = 'urn:li:digitalmediaRecipe:feedshare-image';
+  } else if (videos.length > 0) {
+    singleMedia = videos[0].base64Data;
+    mediaCategory = 'VIDEO';
+    recipe = 'urn:li:digitalmediaRecipe:feedshare-video';
+  } else if (postData.media) {
+    singleMedia = postData.media;
     const mediaType = postData.media.split(';')[0].split(':')[1];
     const isVideo = mediaType.startsWith('video/');
     mediaCategory = isVideo ? 'VIDEO' : 'IMAGE';
@@ -786,54 +1048,22 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
     }
   };
 
-  // If there's media, upload it first
-  if (postData.media) {
-    const mediaBuffer = Buffer.from(postData.media.split(',')[1], 'base64');
-
-    // Register upload
-    const registerResponse = await axios.post(
-      'https://api.linkedin.com/v2/assets?action=registerUpload',
-      {
-        registerUploadRequest: {
-          recipes: [recipe],
-          owner: organizationURN, // Upload media as organization
-          serviceRelationships: [{
-            relationshipType: 'OWNER',
-            identifier: 'urn:li:userGeneratedContent'
-          }]
-        }
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${liToken.accessToken}`,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-
-    const uploadUrl = registerResponse.data.value.uploadMechanism['com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest'].uploadUrl;
-    const asset = registerResponse.data.value.asset;
-
-    // Upload media
-    await axios.put(uploadUrl, mediaBuffer, {
-      headers: {
-        Authorization: `Bearer ${liToken.accessToken}`,
-        'Content-Type': 'application/octet-stream'
-      },
-      maxContentLength: Infinity,
-      maxBodyLength: Infinity
-    });
-
-    // Add media to post
-    postBody.specificContent['com.linkedin.ugc.ShareContent'].media = [{
-      status: 'READY',
-      media: asset
-    }];
+  // If there's single media, upload it
+  if (singleMedia && recipe) {
+    try {
+      const asset = await uploadLinkedInMedia(singleMedia, recipe);
+      postBody.specificContent['com.linkedin.ugc.ShareContent'].media = [{
+        status: 'READY',
+        media: asset
+      }];
+    } catch (error) {
+      console.error('❌ LinkedIn media upload error:', error.response?.data || error.message);
+      throw new Error(`LinkedIn media upload failed: ${error.response?.data?.message || error.message}`);
+    }
   }
 
   try {
     console.log('🔵 Posting to LinkedIn organization:', organizationURN);
-    console.log('🔵 Post body:', JSON.stringify(postBody, null, 2));
 
     const response = await axios.post(
       'https://api.linkedin.com/v2/ugcPosts',
@@ -863,12 +1093,38 @@ app.post('/api/drafts', async (req, res) => {
 
     const postId = postData.id || Date.now().toString();
 
-    // Upload media to Supabase Storage if exists
+    // Handle multiple media items (new format) or single media (legacy format)
+    let uploadedMediaItems = [];
     let mediaUrl = null;
-    if (postData.media) {
+
+    // New format: mediaItems array
+    if (postData.mediaItems && postData.mediaItems.length > 0) {
+      try {
+        uploadedMediaItems = await storage.uploadMultipleMedia(postData.mediaItems, userId);
+        // Filter out failed uploads
+        uploadedMediaItems = uploadedMediaItems.filter(item => item.url);
+        console.log(`✅ ${uploadedMediaItems.length} media files uploaded for draft ${postId}`);
+        // For backwards compatibility, set mediaUrl to first image
+        if (uploadedMediaItems.length > 0) {
+          mediaUrl = uploadedMediaItems[0].url;
+        }
+      } catch (uploadError) {
+        console.error('❌ Media upload failed:', uploadError);
+        return res.status(500).json({ error: 'Error al subir los archivos' });
+      }
+    }
+    // Legacy format: single media string
+    else if (postData.media) {
       try {
         mediaUrl = await storage.uploadMedia(postData.media, userId);
         console.log(`✅ Media uploaded for draft ${postId}: ${mediaUrl}`);
+        // Convert to new format for storage
+        const mediaType = postData.media.split(';')[0].split(':')[1];
+        uploadedMediaItems = [{
+          url: mediaUrl,
+          type: mediaType.startsWith('video/') ? 'video' : 'image',
+          mimeType: mediaType
+        }];
       } catch (uploadError) {
         console.error('❌ Media upload failed:', uploadError);
         return res.status(500).json({ error: 'Error al subir la imagen/video' });
@@ -895,12 +1151,23 @@ app.post('/api/drafts', async (req, res) => {
     if (existingPost) {
       // Update existing
       await pgDb.updatePost(postId, post);
+      // Update media items
+      if (uploadedMediaItems.length > 0) {
+        await pgDb.updatePostMedia(postId, uploadedMediaItems);
+      }
     } else {
       // Create new
       await pgDb.createPost(post);
+      // Create media items
+      if (uploadedMediaItems.length > 0) {
+        await pgDb.createPostMedia(postId, uploadedMediaItems);
+      }
     }
 
-    res.json({ success: true, post: { ...post, hasMedia: !!mediaUrl } });
+    // Get media items for response
+    const mediaItems = await pgDb.getPostMedia(postId);
+
+    res.json({ success: true, post: { ...post, hasMedia: !!mediaUrl, mediaItems } });
   } catch (error) {
     console.error('Draft error:', error);
     res.status(500).json({ error: error.message });
@@ -1175,12 +1442,35 @@ app.post('/api/schedule', async (req, res) => {
 
     const postId = postData.id || Date.now().toString();
 
-    // Upload media to Supabase Storage if exists
+    // Handle multiple media items (new format) or single media (legacy format)
+    let uploadedMediaItems = [];
     let mediaUrl = null;
-    if (postData.media) {
+
+    // New format: mediaItems array
+    if (postData.mediaItems && postData.mediaItems.length > 0) {
+      try {
+        uploadedMediaItems = await storage.uploadMultipleMedia(postData.mediaItems, userId);
+        uploadedMediaItems = uploadedMediaItems.filter(item => item.url);
+        console.log(`✅ ${uploadedMediaItems.length} media files uploaded for schedule ${postId}`);
+        if (uploadedMediaItems.length > 0) {
+          mediaUrl = uploadedMediaItems[0].url;
+        }
+      } catch (uploadError) {
+        console.error('❌ Media upload failed:', uploadError);
+        return res.status(500).json({ error: 'Error al subir los archivos' });
+      }
+    }
+    // Legacy format: single media string
+    else if (postData.media) {
       try {
         mediaUrl = await storage.uploadMedia(postData.media, userId);
         console.log(`✅ Media uploaded for schedule ${postId}: ${mediaUrl}`);
+        const mediaType = postData.media.split(';')[0].split(':')[1];
+        uploadedMediaItems = [{
+          url: mediaUrl,
+          type: mediaType.startsWith('video/') ? 'video' : 'image',
+          mimeType: mediaType
+        }];
       } catch (uploadError) {
         console.error('❌ Media upload failed:', uploadError);
         return res.status(500).json({ error: 'Error al subir la imagen/video' });
@@ -1206,11 +1496,19 @@ app.post('/api/schedule', async (req, res) => {
     const existingPost = await pgDb.getPost(postId);
     if (existingPost) {
       await pgDb.updatePost(postId, post);
+      if (uploadedMediaItems.length > 0) {
+        await pgDb.updatePostMedia(postId, uploadedMediaItems);
+      }
     } else {
       await pgDb.createPost(post);
+      if (uploadedMediaItems.length > 0) {
+        await pgDb.createPostMedia(postId, uploadedMediaItems);
+      }
     }
 
-    res.json({ success: true, post: { ...post, hasMedia: !!mediaUrl } });
+    const mediaItems = await pgDb.getPostMedia(postId);
+
+    res.json({ success: true, post: { ...post, hasMedia: !!mediaUrl, mediaItems } });
   } catch (error) {
     console.error('Schedule error:', error);
     res.status(500).json({ error: error.message });
@@ -1224,32 +1522,62 @@ app.post('/api/post-now', async (req, res) => {
 
     const postId = postData.id || Date.now().toString();
 
-    // Upload media to Supabase Storage if exists
+    // Handle multiple media items (new format) or single media (legacy format)
+    let uploadedMediaItems = [];
     let mediaUrl = null;
-    if (postData.media) {
+
+    // New format: mediaItems array
+    if (postData.mediaItems && postData.mediaItems.length > 0) {
+      try {
+        uploadedMediaItems = await storage.uploadMultipleMedia(postData.mediaItems, userId);
+        uploadedMediaItems = uploadedMediaItems.filter(item => item.url);
+        console.log(`✅ ${uploadedMediaItems.length} media files uploaded for post-now ${postId}`);
+        if (uploadedMediaItems.length > 0) {
+          mediaUrl = uploadedMediaItems[0].url;
+        }
+      } catch (uploadError) {
+        console.error('❌ Media upload failed:', uploadError);
+        return res.status(500).json({ error: 'Error al subir los archivos' });
+      }
+    }
+    // Legacy format: single media string
+    else if (postData.media) {
       try {
         mediaUrl = await storage.uploadMedia(postData.media, userId);
         console.log(`✅ Media uploaded for post-now ${postId}: ${mediaUrl}`);
+        const mediaType = postData.media.split(';')[0].split(':')[1];
+        uploadedMediaItems = [{
+          url: mediaUrl,
+          type: mediaType.startsWith('video/') ? 'video' : 'image',
+          mimeType: mediaType
+        }];
       } catch (uploadError) {
         console.error('❌ Media upload failed:', uploadError);
         return res.status(500).json({ error: 'Error al subir la imagen/video' });
       }
     }
 
-    // For posting, we need base64 (Facebook/LinkedIn APIs require it)
-    // If we have mediaUrl, download it back as base64
-    let mediaBase64 = postData.media;
-    if (mediaUrl && !mediaBase64) {
+    // Prepare media items with base64 for social APIs
+    const mediaItemsWithBase64 = [];
+    for (const item of uploadedMediaItems) {
       try {
-        mediaBase64 = await storage.downloadMediaAsBase64(mediaUrl);
+        const base64 = await storage.downloadMediaAsBase64(item.url);
+        mediaItemsWithBase64.push({ ...item, base64Data: base64 });
       } catch (err) {
-        console.warn('⚠️ Could not download media for posting:', err.message);
+        console.warn(`⚠️ Could not download media ${item.url}:`, err.message);
       }
+    }
+
+    // For backwards compatibility, also set single media
+    let mediaBase64 = postData.media;
+    if (mediaItemsWithBase64.length > 0 && !mediaBase64) {
+      mediaBase64 = mediaItemsWithBase64[0].base64Data;
     }
 
     const postDataWithMedia = {
       ...postData,
-      media: mediaBase64
+      media: mediaBase64,
+      mediaItems: mediaItemsWithBase64
     };
 
     const results = {};
@@ -1283,11 +1611,19 @@ app.post('/api/post-now', async (req, res) => {
     const existingPost = await pgDb.getPost(postId);
     if (existingPost) {
       await pgDb.updatePost(postId, post);
+      if (uploadedMediaItems.length > 0) {
+        await pgDb.updatePostMedia(postId, uploadedMediaItems);
+      }
     } else {
       await pgDb.createPost(post);
+      if (uploadedMediaItems.length > 0) {
+        await pgDb.createPostMedia(postId, uploadedMediaItems);
+      }
     }
 
-    res.json({ success: true, results, post: { ...post, hasMedia: !!mediaUrl } });
+    const mediaItems = await pgDb.getPostMedia(postId);
+
+    res.json({ success: true, results, post: { ...post, hasMedia: !!mediaUrl, mediaItems } });
   } catch (error) {
     console.error('Post error:', error);
     res.status(500).json({ error: error.message });
@@ -1299,8 +1635,8 @@ app.get('/api/posts', async (req, res) => {
   try {
     const userId = req.query.userId || null;
 
-    // Direct query - only fetch necessary fields (no media base64)
-    const posts = await pgDb.getPosts(userId);
+    // Get posts with media items
+    const posts = await pgDb.getPostsWithMedia(userId);
 
     res.json(posts);
   } catch (error) {
@@ -1312,14 +1648,17 @@ app.get('/api/posts', async (req, res) => {
 // ============ GET MEDIA FOR SPECIFIC POST ============
 app.get('/api/posts/:postId/media', async (req, res) => {
   try {
-    const post = await pgDb.getPost(req.params.postId);
+    const post = await pgDb.getPostWithMedia(req.params.postId);
 
     if (!post) {
       return res.status(404).json({ error: 'Post not found' });
     }
 
-    // Return media URL (frontend will fetch from Supabase Storage directly)
-    res.json({ mediaUrl: post.mediaUrl || null });
+    // Return both legacy mediaUrl and new mediaItems array
+    res.json({
+      mediaUrl: post.mediaUrl || null,
+      mediaItems: post.mediaItems || []
+    });
   } catch (error) {
     console.error('Get media error:', error);
     res.status(500).json({ error: error.message });
@@ -1331,12 +1670,24 @@ app.delete('/api/posts/:postId', async (req, res) => {
   try {
     const postId = req.params.postId;
 
-    // Get post to check if it has media
-    const post = await pgDb.getPost(postId);
+    // Get post with media items
+    const post = await pgDb.getPostWithMedia(postId);
 
     if (post) {
-      // Delete media from storage if exists
-      if (post.mediaUrl) {
+      // Delete all media items from storage
+      if (post.mediaItems && post.mediaItems.length > 0) {
+        const mediaUrls = post.mediaItems.map(item => item.url).filter(Boolean);
+        if (mediaUrls.length > 0) {
+          try {
+            await storage.deleteMultipleMedia(mediaUrls);
+            console.log(`🗑️ Deleted ${mediaUrls.length} media files for post ${postId}`);
+          } catch (err) {
+            console.warn('⚠️ Could not delete some media files:', err.message);
+          }
+        }
+      }
+      // Fallback: delete legacy single media if exists
+      else if (post.mediaUrl) {
         try {
           await storage.deleteMedia(post.mediaUrl);
           console.log(`🗑️ Media deleted: ${post.mediaUrl}`);
@@ -1344,6 +1695,9 @@ app.delete('/api/posts/:postId', async (req, res) => {
           console.warn('⚠️ Could not delete media:', err.message);
         }
       }
+
+      // Delete media records from database (cascade should handle this, but be explicit)
+      await pgDb.deletePostMedia(postId);
 
       // Delete post from database
       await pgDb.deletePost(postId);
