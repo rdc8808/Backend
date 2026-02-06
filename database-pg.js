@@ -98,6 +98,11 @@ async function initDB() {
       CREATE INDEX IF NOT EXISTS idx_post_media_post_id ON post_media(post_id)
     `);
 
+    // Add pdf_title column if it doesn't exist
+    await client.query(`
+      ALTER TABLE posts ADD COLUMN IF NOT EXISTS pdf_title VARCHAR(255)
+    `);
+
     console.log('✅ PostgreSQL database initialized successfully');
   } catch (error) {
     console.error('❌ Database initialization error:', error);
@@ -195,6 +200,7 @@ async function getPosts(userId = null, includeDeleted = false) {
       linkedin: row.platforms_linkedin
     },
     linkedInOrganizationId: row.linkedin_organization_id,
+    pdfTitle: row.pdf_title,
     scheduleDate: row.schedule_date,
     scheduleTime: row.schedule_time,
     status: row.status,
@@ -229,6 +235,7 @@ async function getPost(id, includeDeleted = false) {
       linkedin: row.platforms_linkedin
     },
     linkedInOrganizationId: row.linkedin_organization_id,
+    pdfTitle: row.pdf_title,
     scheduleDate: row.schedule_date,
     scheduleTime: row.schedule_time,
     status: row.status,
@@ -245,10 +252,10 @@ async function createPost(post) {
   await pool.query(
     `INSERT INTO posts (
       id, user_id, caption, media, media_url,
-      platforms_facebook, platforms_linkedin, linkedin_organization_id,
+      platforms_facebook, platforms_linkedin, linkedin_organization_id, pdf_title,
       schedule_date, schedule_time, status, approval_status,
       created_at, updated_at
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
     [
       post.id,
       post.userId,
@@ -258,6 +265,7 @@ async function createPost(post) {
       post.platforms?.facebook || false,
       post.platforms?.linkedin || false,
       post.linkedInOrganizationId || null,
+      post.pdfTitle || null,
       post.scheduleDate,
       post.scheduleTime,
       post.status,
@@ -298,6 +306,10 @@ async function updatePost(id, updates) {
   if (updates.linkedInOrganizationId !== undefined) {
     setClauses.push(`linkedin_organization_id = $${paramCount++}`);
     values.push(updates.linkedInOrganizationId);
+  }
+  if (updates.pdfTitle !== undefined) {
+    setClauses.push(`pdf_title = $${paramCount++}`);
+    values.push(updates.pdfTitle);
   }
   if (updates.scheduleDate !== undefined) {
     setClauses.push(`schedule_date = $${paramCount++}`);

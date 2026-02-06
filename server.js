@@ -930,7 +930,7 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
         },
         content: {
           media: {
-            title: pdf.fileName || 'Documento',
+            title: postData.pdfTitle || pdf.fileName || 'Documento',
             id: documentUrn
           }
         },
@@ -1140,6 +1140,7 @@ app.post('/api/drafts', async (req, res) => {
       mediaUrl: mediaUrl,
       platforms: postData.platforms,
       linkedInOrganizationId: postData.linkedInOrganizationId,
+      pdfTitle: postData.pdfTitle || null,
       scheduleDate: postData.scheduleDate,
       scheduleTime: postData.scheduleTime,
       status: 'draft',
@@ -1355,25 +1356,108 @@ app.post('/api/posts/approve', async (req, res) => {
       approvedAt: new Date().toISOString()
     };
 
-    // Update post - ONLY this post, not entire DB
-    await pgDb.updatePost(postId, {
-      status: 'scheduled',
-      scheduleDate: scheduledDate || post.scheduleDate,
-      scheduleTime: scheduledTime || post.scheduleTime,
-      approvalStatus: updatedApprovalStatus
-    });
+    // Check if scheduled time has already passed
+    const finalScheduleDate = scheduledDate || post.scheduleDate;
+    const finalScheduleTime = scheduledTime || post.scheduleTime;
+    const scheduledDateTime = new Date(`${finalScheduleDate}T${finalScheduleTime}`);
+    const now = new Date();
+    const limaTime = new Date(now.toLocaleString('en-US', { timeZone: 'America/Lima' }));
 
-    // Get updated post for response
-    const updatedPost = await pgDb.getPost(postId);
+    const shouldPublishNow = scheduledDateTime <= limaTime;
 
-    // Send email notification to requester
-    const requester = await pgDb.getUser(post.approvalStatus.requestedBy);
-    const approver = await pgDb.getUser(approverId);
-    if (requester && approver) {
-      await sendApprovalDecisionEmail(requester, approver, updatedPost, true);
+    if (shouldPublishNow) {
+      // Scheduled time has passed - publish immediately!
+      console.log(`⏰ Post ${postId} scheduled time has passed, publishing immediately...`);
+
+      try {
+        // Load media items
+        const mediaItems = await pgDb.getPostMedia(postId);
+        const mediaItemsWithBase64 = [];
+
+        for (const item of mediaItems) {
+          try {
+            const base64 = await storage.downloadMediaAsBase64(item.url);
+            mediaItemsWithBase64.push({ ...item, base64Data: base64 });
+          } catch (err) {
+            console.warn(`⚠️ Could not download media ${item.url}:`, err.message);
+          }
+        }
+
+        // Also handle legacy single media
+        if (mediaItemsWithBase64.length === 0 && post.mediaUrl) {
+          try {
+            post.media = await storage.downloadMediaAsBase64(post.mediaUrl);
+          } catch (err) {
+            console.warn(`⚠️ Could not download media for post ${post.id}:`, err.message);
+          }
+        }
+
+        post.mediaItems = mediaItemsWithBase64;
+        if (mediaItemsWithBase64.length > 0 && !post.media) {
+          post.media = mediaItemsWithBase64[0].base64Data;
+        }
+
+        const results = {};
+
+        if (post.platforms.facebook) {
+          results.facebook = await postToFacebook(post.userId, post);
+        }
+
+        if (post.platforms.linkedin) {
+          results.linkedin = await postToLinkedIn(post.userId, post, post.linkedInOrganizationId);
+        }
+
+        // Update post as published
+        await pgDb.updatePost(postId, {
+          status: 'published',
+          publishedAt: limaTime.toISOString(),
+          results: results,
+          approvalStatus: updatedApprovalStatus
+        });
+
+        console.log(`✅ Post ${postId} published immediately after late approval`);
+
+        // Get updated post for response
+        const updatedPost = await pgDb.getPost(postId);
+
+        // Send email notification to requester
+        const requester = await pgDb.getUser(post.approvalStatus.requestedBy);
+        const approverUser = await pgDb.getUser(approverId);
+        if (requester && approverUser) {
+          await sendApprovalDecisionEmail(requester, approverUser, updatedPost, true);
+        }
+
+        return res.json({ success: true, post: updatedPost, publishedImmediately: true });
+      } catch (publishError) {
+        console.error(`❌ Failed to publish post ${postId} immediately:`, publishError.message);
+        // Fall back to scheduled status if publishing fails
+        await pgDb.updatePost(postId, {
+          status: 'failed',
+          approvalStatus: updatedApprovalStatus
+        });
+        return res.status(500).json({ error: `Error al publicar: ${publishError.message}` });
+      }
+    } else {
+      // Scheduled time hasn't passed yet - just mark as scheduled
+      await pgDb.updatePost(postId, {
+        status: 'scheduled',
+        scheduleDate: finalScheduleDate,
+        scheduleTime: finalScheduleTime,
+        approvalStatus: updatedApprovalStatus
+      });
+
+      // Get updated post for response
+      const updatedPost = await pgDb.getPost(postId);
+
+      // Send email notification to requester
+      const requester = await pgDb.getUser(post.approvalStatus.requestedBy);
+      const approverUser = await pgDb.getUser(approverId);
+      if (requester && approverUser) {
+        await sendApprovalDecisionEmail(requester, approverUser, updatedPost, true);
+      }
+
+      res.json({ success: true, post: updatedPost, publishedImmediately: false });
     }
-
-    res.json({ success: true, post: updatedPost });
   } catch (error) {
     console.error('Approve post error:', error);
     res.status(500).json({ error: error.message });
@@ -1486,6 +1570,7 @@ app.post('/api/schedule', async (req, res) => {
       mediaUrl: mediaUrl,
       platforms: postData.platforms,
       linkedInOrganizationId: postData.linkedInOrganizationId,
+      pdfTitle: postData.pdfTitle || null,
       scheduleDate: postData.scheduleDate,
       scheduleTime: postData.scheduleTime,
       status: 'scheduled',
@@ -1600,6 +1685,7 @@ app.post('/api/post-now', async (req, res) => {
       mediaUrl: mediaUrl,
       platforms: postData.platforms,
       linkedInOrganizationId: postData.linkedInOrganizationId,
+      pdfTitle: postData.pdfTitle || null,
       scheduleDate: postData.scheduleDate,
       scheduleTime: postData.scheduleTime,
       status: 'published',
