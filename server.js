@@ -1330,23 +1330,29 @@ app.get('/api/posts/pending-approval', async (req, res) => {
       [userId]
     );
 
-    const posts = result.rows.map(row => ({
-      id: row.id,
-      userId: row.user_id,
-      caption: row.caption,
-      mediaUrl: row.media_url,
-      hasMedia: !!row.media_url,
-      platforms: {
-        facebook: row.platforms_facebook,
-        linkedin: row.platforms_linkedin
-      },
-      linkedInOrganizationId: row.linkedin_organization_id,
-      scheduleDate: row.schedule_date,
-      scheduleTime: row.schedule_time,
-      status: row.status,
-      approvalStatus: row.approval_status,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at
+    const posts = await Promise.all(result.rows.map(async row => {
+      // Load media items for this post
+      const mediaItems = await pgDb.getPostMedia(row.id);
+
+      return {
+        id: row.id,
+        userId: row.user_id,
+        caption: row.caption,
+        mediaUrl: row.media_url,
+        hasMedia: !!row.media_url || mediaItems.length > 0,
+        mediaItems: mediaItems,
+        platforms: {
+          facebook: row.platforms_facebook,
+          linkedin: row.platforms_linkedin
+        },
+        linkedInOrganizationId: row.linkedin_organization_id,
+        scheduleDate: row.schedule_date,
+        scheduleTime: row.schedule_time,
+        status: row.status,
+        approvalStatus: row.approval_status,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at
+      };
     }));
 
     res.json(posts);
@@ -1374,23 +1380,29 @@ app.get('/api/posts/my-pending-approvals', async (req, res) => {
       [userId]
     );
 
-    const posts = result.rows.map(row => ({
-      id: row.id,
-      userId: row.user_id,
-      caption: row.caption,
-      mediaUrl: row.media_url,
-      hasMedia: !!row.media_url,
-      platforms: {
-        facebook: row.platforms_facebook,
-        linkedin: row.platforms_linkedin
-      },
-      linkedInOrganizationId: row.linkedin_organization_id,
-      scheduleDate: row.schedule_date,
-      scheduleTime: row.schedule_time,
-      status: row.status,
-      approvalStatus: row.approval_status,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at
+    const posts = await Promise.all(result.rows.map(async row => {
+      // Load media items for this post
+      const mediaItems = await pgDb.getPostMedia(row.id);
+
+      return {
+        id: row.id,
+        userId: row.user_id,
+        caption: row.caption,
+        mediaUrl: row.media_url,
+        hasMedia: !!row.media_url || mediaItems.length > 0,
+        mediaItems: mediaItems,
+        platforms: {
+          facebook: row.platforms_facebook,
+          linkedin: row.platforms_linkedin
+        },
+        linkedInOrganizationId: row.linkedin_organization_id,
+        scheduleDate: row.schedule_date,
+        scheduleTime: row.schedule_time,
+        status: row.status,
+        approvalStatus: row.approval_status,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at
+      };
     }));
 
     res.json(posts);
@@ -1425,11 +1437,34 @@ app.post('/api/posts/approve', async (req, res) => {
     // Check if scheduled time has already passed
     const finalScheduleDate = scheduledDate || post.scheduleDate;
     const finalScheduleTime = scheduledTime || post.scheduleTime;
-    const scheduledDateTime = new Date(`${finalScheduleDate}T${finalScheduleTime}`);
-    const now = new Date();
-    const limaTime = new Date(now.toLocaleString('en-US', { timeZone: 'America/Lima' }));
 
-    const shouldPublishNow = scheduledDateTime <= limaTime;
+    // Get current time in Lima timezone
+    const now = new Date();
+    const limaFormatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Lima',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    });
+    const limaParts = limaFormatter.formatToParts(now);
+    const limaDate = `${limaParts.find(p => p.type === 'year').value}-${limaParts.find(p => p.type === 'month').value}-${limaParts.find(p => p.type === 'day').value}`;
+    const limaHour = limaParts.find(p => p.type === 'hour').value;
+    const limaMinute = limaParts.find(p => p.type === 'minute').value;
+    const limaTimeStr = `${limaHour}:${limaMinute}`;
+
+    console.log(`🔍 Approve check - Post ${postId}:`);
+    console.log(`   Scheduled: ${finalScheduleDate} ${finalScheduleTime}`);
+    console.log(`   Lima now: ${limaDate} ${limaTimeStr}`);
+    console.log(`   Platforms:`, post.platforms);
+
+    // Compare dates and times as strings (both are in Lima timezone)
+    const scheduledStr = `${finalScheduleDate} ${finalScheduleTime}`;
+    const limaStr = `${limaDate} ${limaTimeStr}`;
+    const shouldPublishNow = scheduledStr <= limaStr;
+    console.log(`   Should publish now: ${shouldPublishNow}`);
 
     if (shouldPublishNow) {
       // Scheduled time has passed - publish immediately!
@@ -1476,7 +1511,7 @@ app.post('/api/posts/approve', async (req, res) => {
         // Update post as published
         await pgDb.updatePost(postId, {
           status: 'published',
-          publishedAt: limaTime.toISOString(),
+          publishedAt: new Date().toISOString(),
           results: results,
           approvalStatus: updatedApprovalStatus
         });
@@ -1492,6 +1527,9 @@ app.post('/api/posts/approve', async (req, res) => {
         if (requester && approverUser) {
           await sendApprovalDecisionEmail(requester, approverUser, updatedPost, true);
         }
+
+        // Send email notification to all admins about successful publication
+        await sendPostPublishedEmail(updatedPost, post.platforms);
 
         return res.json({ success: true, post: updatedPost, publishedImmediately: true });
       } catch (publishError) {
