@@ -835,10 +835,20 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
 
   // Get media items (new format) or fall back to single media (legacy)
   const mediaItems = postData.mediaItems || [];
-  console.log(`🔵 LinkedIn postToLinkedIn received ${mediaItems.length} mediaItems:`, mediaItems.map(m => ({ type: m.type, hasBase64: !!m.base64Data })));
-  const images = mediaItems.filter(m => m.type === 'image' && m.base64Data);
-  const videos = mediaItems.filter(m => m.type === 'video' && m.base64Data);
-  const pdfs = mediaItems.filter(m => m.type === 'pdf' && m.base64Data);
+  console.log(`🔵 LinkedIn postToLinkedIn received ${mediaItems.length} mediaItems:`, mediaItems.map(m => ({ type: m.type, mimeType: m.mimeType, hasBase64: !!m.base64Data, base64Start: m.base64Data?.substring(0, 30) })));
+
+  // Detect type from multiple sources (type field, mimeType field, or base64 header)
+  const getMediaType = (m) => {
+    if (m.type === 'pdf' || m.mimeType === 'application/pdf') return 'pdf';
+    if (m.base64Data?.startsWith('data:application/pdf')) return 'pdf';
+    if (m.type === 'video' || m.mimeType?.startsWith('video/')) return 'video';
+    if (m.base64Data?.startsWith('data:video/')) return 'video';
+    return 'image';
+  };
+
+  const images = mediaItems.filter(m => getMediaType(m) === 'image' && m.base64Data);
+  const videos = mediaItems.filter(m => getMediaType(m) === 'video' && m.base64Data);
+  const pdfs = mediaItems.filter(m => getMediaType(m) === 'pdf' && m.base64Data);
   console.log(`🔵 LinkedIn detected: ${images.length} images, ${videos.length} videos, ${pdfs.length} PDFs`);
 
   // Helper function to upload a single media to LinkedIn
