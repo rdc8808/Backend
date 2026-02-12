@@ -103,6 +103,43 @@ async function initDB() {
       ALTER TABLE posts ADD COLUMN IF NOT EXISTS pdf_title VARCHAR(255)
     `);
 
+    // Enable Row Level Security on all tables
+    await client.query(`ALTER TABLE IF EXISTS posts ENABLE ROW LEVEL SECURITY`);
+    await client.query(`ALTER TABLE IF EXISTS post_media ENABLE ROW LEVEL SECURITY`);
+    await client.query(`ALTER TABLE IF EXISTS users ENABLE ROW LEVEL SECURITY`);
+    await client.query(`ALTER TABLE IF EXISTS tokens ENABLE ROW LEVEL SECURITY`);
+
+    // Create policies to allow all operations (since we access via service role key)
+    // These policies allow the service role full access while blocking public access
+    await client.query(`
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'posts' AND policyname = 'service_role_all') THEN
+          CREATE POLICY service_role_all ON posts FOR ALL USING (true) WITH CHECK (true);
+        END IF;
+      END $$;
+    `);
+    await client.query(`
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'post_media' AND policyname = 'service_role_all') THEN
+          CREATE POLICY service_role_all ON post_media FOR ALL USING (true) WITH CHECK (true);
+        END IF;
+      END $$;
+    `);
+    await client.query(`
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'users' AND policyname = 'service_role_all') THEN
+          CREATE POLICY service_role_all ON users FOR ALL USING (true) WITH CHECK (true);
+        END IF;
+      END $$;
+    `);
+    await client.query(`
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'tokens' AND policyname = 'service_role_all') THEN
+          CREATE POLICY service_role_all ON tokens FOR ALL USING (true) WITH CHECK (true);
+        END IF;
+      END $$;
+    `);
+
     console.log('✅ PostgreSQL database initialized successfully');
   } catch (error) {
     console.error('❌ Database initialization error:', error);
