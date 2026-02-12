@@ -236,6 +236,61 @@ async function sendApprovalDecisionEmail(requester, approver, post, approved) {
   }
 }
 
+// Email to admin when a post is published (scheduled or immediate)
+async function sendPostPublishedEmail(post, publishedPlatforms) {
+  try {
+    // Get all admin users
+    const users = await pgDb.getUsers();
+    const admins = Object.values(users).filter(u => u.role === 'admin');
+
+    if (admins.length === 0) {
+      console.log('⚠️ No admins to notify about published post');
+      return;
+    }
+
+    const platformsList = Object.keys(publishedPlatforms).filter(p => publishedPlatforms[p]).join(', ');
+    const postCreator = await pgDb.getUser(post.userId);
+    const creatorName = postCreator?.fullName || post.userId;
+
+    for (const admin of admins) {
+      console.log(`📧 Sending post published notification to admin ${admin.email}...`);
+      await resend.emails.send({
+        from: FROM_EMAIL,
+        to: admin.email,
+        subject: `✅ Publicación realizada en ${platformsList}`,
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h1 style="color: #28a745;">✅ Publicación Exitosa</h1>
+            <p>Hola <strong>${admin.fullName}</strong>,</p>
+            <p>Una publicación ha sido publicada exitosamente.</p>
+
+            <div style="background: #d4edda; border: 1px solid #c3e6cb; padding: 15px; border-radius: 5px; margin: 20px 0;">
+              <p><strong>Plataformas:</strong> ${platformsList}</p>
+              <p><strong>Creador:</strong> ${creatorName}</p>
+              <p><strong>Fecha:</strong> ${new Date().toLocaleString('es-PE', { timeZone: 'America/Lima' })}</p>
+            </div>
+
+            <div style="background: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0;">
+              <p><strong>Contenido:</strong></p>
+              <p style="white-space: pre-wrap;">${post.caption?.substring(0, 500)}${post.caption?.length > 500 ? '...' : ''}</p>
+            </div>
+
+            <p>
+              <a href="${CONFIG.CLIENT_URL}"
+                 style="background: #0050cb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; display: inline-block;">
+                Ver en la Plataforma
+              </a>
+            </p>
+          </div>
+        `
+      });
+      console.log(`✅ Post published email sent to ${admin.email}`);
+    }
+  } catch (error) {
+    console.error('❌ Failed to send post published email:', error);
+  }
+}
+
 // Email to collaborator confirming their post was sent for approval
 async function sendCollaboratorConfirmationEmail(collaborator, approver, post) {
   try {
@@ -964,9 +1019,10 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
       console.log('✅ LinkedIn PDF document post successful');
       return response.data;
     } catch (error) {
-      console.error('❌ LinkedIn PDF upload error:', error.response?.data || error.message);
-      // Fall back to regular post if document API fails
-      console.log('⚠️ Falling back to text-only post');
+      console.error('❌ LinkedIn PDF upload error:', JSON.stringify(error.response?.data, null, 2) || error.message);
+      console.error('❌ Full error details:', error.response?.status, error.response?.statusText);
+      // THROW the error - don't silently fall back to text-only
+      throw new Error(`LinkedIn PDF upload failed: ${JSON.stringify(error.response?.data) || error.message}`);
     }
   }
 
@@ -1134,7 +1190,7 @@ app.post('/api/drafts', async (req, res) => {
         const mediaType = postData.media.split(';')[0].split(':')[1];
         uploadedMediaItems = [{
           url: mediaUrl,
-          type: mediaType.startsWith('video/') ? 'video' : 'image',
+          type: mediaType === 'application/pdf' ? 'pdf' : mediaType.startsWith('video/') ? 'video' : 'image',
           mimeType: mediaType
         }];
       } catch (uploadError) {
@@ -1564,7 +1620,7 @@ app.post('/api/schedule', async (req, res) => {
         const mediaType = postData.media.split(';')[0].split(':')[1];
         uploadedMediaItems = [{
           url: mediaUrl,
-          type: mediaType.startsWith('video/') ? 'video' : 'image',
+          type: mediaType === 'application/pdf' ? 'pdf' : mediaType.startsWith('video/') ? 'video' : 'image',
           mimeType: mediaType
         }];
       } catch (uploadError) {
@@ -1645,7 +1701,7 @@ app.post('/api/post-now', async (req, res) => {
         const mediaType = postData.media.split(';')[0].split(':')[1];
         uploadedMediaItems = [{
           url: mediaUrl,
-          type: mediaType.startsWith('video/') ? 'video' : 'image',
+          type: mediaType === 'application/pdf' ? 'pdf' : mediaType.startsWith('video/') ? 'video' : 'image',
           mimeType: mediaType
         }];
       } catch (uploadError) {
@@ -1720,6 +1776,9 @@ app.post('/api/post-now', async (req, res) => {
     }
 
     const mediaItems = await pgDb.getPostMedia(postId);
+
+    // Send email notification to admins
+    await sendPostPublishedEmail(post, postData.platforms);
 
     res.json({ success: true, results, post: { ...post, hasMedia: !!mediaUrl, mediaItems } });
   } catch (error) {
@@ -2138,6 +2197,9 @@ cron.schedule('* * * * *', async () => {
           });
 
           console.log(`✅ Successfully published post ${post.id}`);
+
+          // Send email notification to admins
+          await sendPostPublishedEmail(post, post.platforms);
         } catch (error) {
           console.error(`❌ Failed to publish post ${post.id}:`, error.message);
           await pgDb.updatePost(post.id, {
