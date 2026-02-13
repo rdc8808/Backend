@@ -1316,6 +1316,7 @@ app.post('/api/posts/send-for-approval', async (req, res) => {
 app.get('/api/posts/pending-approval', async (req, res) => {
   try {
     const { userId } = req.query;
+    console.log(`📋 Loading pending approvals for user: ${userId}`);
 
     // Direct query - only get posts with status = pending_approval for this approver
     const result = await pgDb.pool.query(
@@ -1329,10 +1330,12 @@ app.get('/api/posts/pending-approval', async (req, res) => {
        ORDER BY created_at DESC`,
       [userId]
     );
+    console.log(`📋 Found ${result.rows.length} pending posts`);
 
     const posts = await Promise.all(result.rows.map(async row => {
       // Load media items for this post
       const mediaItems = await pgDb.getPostMedia(row.id);
+      console.log(`📋 Post ${row.id} mediaItems:`, JSON.stringify(mediaItems));
 
       return {
         id: row.id,
