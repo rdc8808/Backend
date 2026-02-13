@@ -110,8 +110,29 @@ async function downloadMediaAsBase64(mediaUrl) {
     const buffer = Buffer.from(arrayBuffer);
     const base64 = buffer.toString('base64');
 
-    // Get mime type from blob
-    const mimeType = data.type || 'image/jpeg';
+    // Get mime type from blob or infer from URL
+    let mimeType = data.type;
+
+    // If blob type is generic or missing, infer from URL extension
+    if (!mimeType || mimeType === 'application/octet-stream') {
+      if (mediaUrl.endsWith('.pdf')) {
+        mimeType = 'application/pdf';
+      } else if (mediaUrl.endsWith('.mp4')) {
+        mimeType = 'video/mp4';
+      } else if (mediaUrl.endsWith('.mov')) {
+        mimeType = 'video/quicktime';
+      } else if (mediaUrl.endsWith('.png')) {
+        mimeType = 'image/png';
+      } else if (mediaUrl.endsWith('.gif')) {
+        mimeType = 'image/gif';
+      } else if (mediaUrl.endsWith('.webp')) {
+        mimeType = 'image/webp';
+      } else {
+        mimeType = 'image/jpeg';  // Default fallback
+      }
+    }
+
+    console.log(`📥 Downloaded ${fileName}, mimeType: ${mimeType}, size: ${buffer.length} bytes`);
 
     return `data:${mimeType};base64,${base64}`;
   } catch (error) {
