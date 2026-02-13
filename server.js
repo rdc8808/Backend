@@ -1252,18 +1252,43 @@ app.post('/api/posts/send-for-approval', async (req, res) => {
       return res.status(400).json({ error: 'Debe seleccionar un aprobador' });
     }
 
-    const postId = postData.id || Date.now().toString();
+    const postId = postData.id || `post_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    console.log(`📤 Send for approval - postId: ${postId}, mediaItems: ${postData.mediaItems?.length || 0}`);
 
-    // Upload media to Supabase Storage if exists
+    // Upload all media items to Supabase Storage
+    const uploadedMediaItems = [];
+    if (postData.mediaItems && postData.mediaItems.length > 0) {
+      for (const item of postData.mediaItems) {
+        if (item.base64Data) {
+          try {
+            const url = await storage.uploadMedia(item.base64Data, userId);
+            uploadedMediaItems.push({
+              url: url,
+              type: item.type,  // 'image', 'video', or 'pdf'
+              fileName: item.fileName,
+              fileSize: item.fileSize,
+              mimeType: item.mimeType
+            });
+            console.log(`✅ Uploaded ${item.type} for approval: ${url}`);
+          } catch (uploadError) {
+            console.error(`❌ Failed to upload ${item.type}:`, uploadError.message);
+          }
+        }
+      }
+    }
+
+    // Fallback: upload single media if no mediaItems
     let mediaUrl = null;
-    if (postData.media) {
+    if (uploadedMediaItems.length === 0 && postData.media) {
       try {
         mediaUrl = await storage.uploadMedia(postData.media, userId);
-        console.log(`✅ Media uploaded for approval ${postId}: ${mediaUrl}`);
+        console.log(`✅ Legacy media uploaded for approval ${postId}: ${mediaUrl}`);
       } catch (uploadError) {
         console.error('❌ Media upload failed:', uploadError);
         return res.status(500).json({ error: 'Error al subir la imagen/video' });
       }
+    } else if (uploadedMediaItems.length > 0) {
+      mediaUrl = uploadedMediaItems[0].url;  // First item for backwards compatibility
     }
 
     const post = {
@@ -1273,6 +1298,7 @@ app.post('/api/posts/send-for-approval', async (req, res) => {
       mediaUrl: mediaUrl,
       platforms: postData.platforms,
       linkedInOrganizationId: postData.linkedInOrganizationId,
+      pdfTitle: postData.pdfTitle,
       scheduleDate: postData.scheduleDate,
       scheduleTime: postData.scheduleTime,
       status: 'pending_approval',
@@ -1297,6 +1323,12 @@ app.post('/api/posts/send-for-approval', async (req, res) => {
       await pgDb.createPost(post);
     }
 
+    // Save media items with correct types
+    if (uploadedMediaItems.length > 0) {
+      await pgDb.updatePostMedia(postId, uploadedMediaItems);
+      console.log(`✅ Saved ${uploadedMediaItems.length} media items with types:`, uploadedMediaItems.map(m => m.type));
+    }
+
     // Send email notifications
     const approver = await pgDb.getUser(approverId);
     const requester = await pgDb.getUser(userId);
@@ -1305,7 +1337,7 @@ app.post('/api/posts/send-for-approval', async (req, res) => {
       await sendCollaboratorConfirmationEmail(requester, approver, post);
     }
 
-    res.json({ success: true, post: { ...post, hasMedia: !!mediaUrl } });
+    res.json({ success: true, post: { ...post, hasMedia: !!mediaUrl, mediaItems: uploadedMediaItems } });
   } catch (error) {
     console.error('Send for approval error:', error);
     res.status(500).json({ error: error.message });
