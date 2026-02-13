@@ -1473,14 +1473,17 @@ app.post('/api/posts/approve', async (req, res) => {
       try {
         // Load media items
         const mediaItems = await pgDb.getPostMedia(postId);
+        console.log(`📥 Loading ${mediaItems.length} media items for post ${postId}:`, mediaItems.map(m => ({ type: m.type, mimeType: m.mimeType, url: m.url })));
         const mediaItemsWithBase64 = [];
 
         for (const item of mediaItems) {
           try {
+            console.log(`📥 Downloading media: ${item.url} (type: ${item.type}, mimeType: ${item.mimeType})`);
             const base64 = await storage.downloadMediaAsBase64(item.url);
+            console.log(`✅ Downloaded media, base64 length: ${base64?.length || 0}, starts with: ${base64?.substring(0, 50)}`);
             mediaItemsWithBase64.push({ ...item, base64Data: base64 });
           } catch (err) {
-            console.warn(`⚠️ Could not download media ${item.url}:`, err.message);
+            console.error(`❌ Could not download media ${item.url}:`, err.message);
           }
         }
 
