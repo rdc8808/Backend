@@ -211,7 +211,8 @@ async function getPosts(userId = null, includeDeleted = false) {
   let whereConditions = [];
 
   if (userId) {
-    whereConditions.push('user_id = $1');
+    // User should see: their own posts OR posts they requested approval for
+    whereConditions.push(`(user_id = $1 OR approval_status->>'requestedBy' = $1)`);
     params.push(userId);
   }
 
