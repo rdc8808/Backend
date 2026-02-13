@@ -1016,8 +1016,11 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
         }
       );
 
-      console.log('✅ LinkedIn PDF document post successful');
-      return response.data;
+      console.log('✅ LinkedIn PDF document post successful, status:', response.status);
+      console.log('✅ LinkedIn PDF response headers:', JSON.stringify(response.headers));
+      // LinkedIn often returns empty body with 201, check headers for post ID
+      const postId = response.headers['x-restli-id'] || response.headers['x-linkedin-id'] || response.data;
+      return { success: true, id: postId, status: response.status };
     } catch (error) {
       console.error('❌ LinkedIn PDF upload error:', JSON.stringify(error.response?.data, null, 2) || error.message);
       console.error('❌ Full error details:', error.response?.status, error.response?.statusText);
@@ -1565,9 +1568,12 @@ app.post('/api/posts/approve', async (req, res) => {
         }
 
         // Check if at least one platform was successful
-        const fbSuccess = post.platforms.facebook && results.facebook && !results.facebook.error;
-        const liSuccess = post.platforms.linkedin && results.linkedin && !results.linkedin.error;
+        // A result is successful if it's a non-empty object without an error property
+        const isValidResult = (r) => r && typeof r === 'object' && Object.keys(r).length > 0 && !r.error;
+        const fbSuccess = post.platforms.facebook && isValidResult(results.facebook);
+        const liSuccess = post.platforms.linkedin && isValidResult(results.linkedin);
         const anySuccess = fbSuccess || liSuccess;
+        console.log(`📊 Success check - FB: ${fbSuccess}, LI: ${liSuccess}, Any: ${anySuccess}`);
 
         // Update post status based on results
         const finalStatus = anySuccess ? 'published' : 'failed';
