@@ -1499,24 +1499,48 @@ app.post('/api/posts/approve', async (req, res) => {
         }
 
         const results = {};
+        let hasError = false;
 
         if (post.platforms.facebook) {
-          results.facebook = await postToFacebook(post.userId, post);
+          try {
+            results.facebook = await postToFacebook(post.userId, post);
+            console.log(`✅ Facebook publish result:`, results.facebook);
+          } catch (fbError) {
+            console.error(`❌ Facebook publish error:`, fbError.message);
+            results.facebook = { error: fbError.message };
+            hasError = true;
+          }
         }
 
         if (post.platforms.linkedin) {
-          results.linkedin = await postToLinkedIn(post.userId, post, post.linkedInOrganizationId);
+          try {
+            results.linkedin = await postToLinkedIn(post.userId, post, post.linkedInOrganizationId);
+            console.log(`✅ LinkedIn publish result:`, results.linkedin);
+            if (results.linkedin?.error) {
+              hasError = true;
+            }
+          } catch (liError) {
+            console.error(`❌ LinkedIn publish error:`, liError.message);
+            results.linkedin = { error: liError.message };
+            hasError = true;
+          }
         }
 
-        // Update post as published
+        // Check if at least one platform was successful
+        const fbSuccess = post.platforms.facebook && results.facebook && !results.facebook.error;
+        const liSuccess = post.platforms.linkedin && results.linkedin && !results.linkedin.error;
+        const anySuccess = fbSuccess || liSuccess;
+
+        // Update post status based on results
+        const finalStatus = anySuccess ? 'published' : 'failed';
         await pgDb.updatePost(postId, {
-          status: 'published',
-          publishedAt: new Date().toISOString(),
+          status: finalStatus,
+          publishedAt: anySuccess ? new Date().toISOString() : null,
           results: results,
           approvalStatus: updatedApprovalStatus
         });
 
-        console.log(`✅ Post ${postId} published immediately after late approval`);
+        console.log(`${anySuccess ? '✅' : '❌'} Post ${postId} ${finalStatus} after late approval. Results:`, results);
 
         // Get updated post for response
         const updatedPost = await pgDb.getPost(postId);
@@ -1528,10 +1552,29 @@ app.post('/api/posts/approve', async (req, res) => {
           await sendApprovalDecisionEmail(requester, approverUser, updatedPost, true);
         }
 
-        // Send email notification to all admins about successful publication
-        await sendPostPublishedEmail(updatedPost, post.platforms);
+        // Send email notification to all admins about successful publication (only if success)
+        if (anySuccess) {
+          await sendPostPublishedEmail(updatedPost, post.platforms);
+        }
 
-        return res.json({ success: true, post: updatedPost, publishedImmediately: true });
+        // Return with details about what worked and what didn't
+        if (!anySuccess) {
+          return res.status(500).json({
+            success: false,
+            error: 'Error al publicar en las plataformas',
+            post: updatedPost,
+            results: results,
+            publishedImmediately: true
+          });
+        }
+
+        return res.json({
+          success: true,
+          post: updatedPost,
+          publishedImmediately: true,
+          results: results,
+          warnings: hasError ? 'Algunas plataformas tuvieron errores' : null
+        });
       } catch (publishError) {
         console.error(`❌ Failed to publish post ${postId} immediately:`, publishError.message);
         // Fall back to scheduled status if publishing fails
