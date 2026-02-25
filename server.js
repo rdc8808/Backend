@@ -2246,6 +2246,7 @@ cron.schedule('* * * * *', async () => {
           linkedin: row.platforms_linkedin
         },
         linkedInOrganizationId: row.linkedin_organization_id,
+        pdfTitle: row.pdf_title,
         scheduleDate: row.schedule_date,
         scheduleTime: row.schedule_time,
         status: row.status,
