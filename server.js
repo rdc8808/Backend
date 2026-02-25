@@ -951,6 +951,12 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
     const pdf = pdfs[0]; // LinkedIn only supports 1 document per post
     const pdfBuffer = Buffer.from(pdf.base64Data.split(',')[1], 'base64');
 
+    // Log caption details to diagnose any truncation
+    const caption = String(postData.caption || '');
+    console.log(`📝 LinkedIn doc post caption - JS length (UTF-16 units): ${caption.length}`);
+    console.log(`📝 LinkedIn doc post caption - UTF-8 bytes: ${Buffer.byteLength(caption, 'utf8')}`);
+    console.log(`📝 LinkedIn doc post caption - Full text: ${JSON.stringify(caption)}`);
+
     try {
       // Step 1: Initialize document upload
       const initResponse = await axios.post(
@@ -965,7 +971,7 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
             Authorization: `Bearer ${liToken.accessToken}`,
             'Content-Type': 'application/json',
             'X-Restli-Protocol-Version': '2.0.0',
-            'LinkedIn-Version': '202601'
+            'LinkedIn-Version': '202501'
           }
         }
       );
@@ -986,7 +992,7 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
       // Step 3: Create post with document
       const documentPostBody = {
         author: organizationURN,
-        commentary: postData.caption,
+        commentary: caption,
         visibility: 'PUBLIC',
         distribution: {
           feedDistribution: 'MAIN_FEED',
@@ -1003,6 +1009,8 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
         isReshareDisabledByAuthor: false
       };
 
+      console.log(`📝 LinkedIn doc post body JSON length: ${JSON.stringify(documentPostBody).length}`);
+
       const response = await axios.post(
         'https://api.linkedin.com/rest/posts',
         documentPostBody,
@@ -1011,8 +1019,10 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
             Authorization: `Bearer ${liToken.accessToken}`,
             'Content-Type': 'application/json',
             'X-Restli-Protocol-Version': '2.0.0',
-            'LinkedIn-Version': '202601'
-          }
+            'LinkedIn-Version': '202501'
+          },
+          maxContentLength: Infinity,
+          maxBodyLength: Infinity
         }
       );
 
