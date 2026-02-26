@@ -1009,18 +1009,22 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
         isReshareDisabledByAuthor: false
       };
 
-      console.log(`📝 LinkedIn doc post body JSON length: ${JSON.stringify(documentPostBody).length}`);
+      // Pre-serialize to ensure no double-encoding by axios
+      const rawJsonBody = JSON.stringify(documentPostBody);
+      console.log(`📝 LinkedIn doc post - raw JSON body length: ${rawJsonBody.length}`);
+      console.log(`📝 LinkedIn doc post - JSON commentary snippet: ${rawJsonBody.substring(0, 600)}`);
 
       const response = await axios.post(
         'https://api.linkedin.com/rest/posts',
-        documentPostBody,
+        rawJsonBody,
         {
           headers: {
             Authorization: `Bearer ${liToken.accessToken}`,
-            'Content-Type': 'application/json',
+            'Content-Type': 'application/json; charset=utf-8',
             'X-Restli-Protocol-Version': '2.0.0',
             'LinkedIn-Version': '202601'
           },
+          transformRequest: [(data) => data],
           maxContentLength: Infinity,
           maxBodyLength: Infinity
         }
