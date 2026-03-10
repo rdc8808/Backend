@@ -945,6 +945,46 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
     return asset;
   }
 
+  // Sanitize caption text before sending to LinkedIn.
+  // LinkedIn silently truncates at certain invisible/control characters that users
+  // can't see (e.g. from copy-paste from Word, Google Docs, or LinkedIn's own editor).
+  function sanitizeCaption(text) {
+    let issues = [];
+    let result = text;
+
+    // 1. Normalize Windows/old-Mac line endings → Unix \n
+    if (/\r/.test(result)) {
+      issues.push('\\r (carriage return)');
+      result = result.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    }
+    // 2. Strip invisible formatting/directional characters
+    const invisibleChars = [
+      ['\u200B', 'U+200B zero-width space'],
+      ['\u200C', 'U+200C zero-width non-joiner'],
+      ['\u200D', 'U+200D zero-width joiner'],
+      ['\uFEFF', 'U+FEFF BOM/zero-width no-break space'],
+      ['\u200E', 'U+200E left-to-right mark'],
+      ['\u200F', 'U+200F right-to-left mark'],
+      ['\u00AD', 'U+00AD soft hyphen'],
+    ];
+    for (const [char, label] of invisibleChars) {
+      if (result.includes(char)) {
+        issues.push(label);
+        result = result.split(char).join('');
+      }
+    }
+    // 3. Unicode line/paragraph separators → \n
+    if (/[\u2028\u2029]/.test(result)) {
+      issues.push('U+2028/U+2029 line/paragraph separator');
+      result = result.replace(/[\u2028\u2029]/g, '\n');
+    }
+
+    if (issues.length > 0) {
+      console.warn(`⚠️  LinkedIn caption contained invisible characters that were cleaned: ${issues.join(', ')}`);
+    }
+    return result;
+  }
+
   // Normalize Mathematical Alphanumeric Symbols (U+1D400–U+1D7FF) to plain ASCII.
   // LinkedIn's /rest/posts API silently truncates commentary at the first supplementary
   // Unicode character in these ranges ("fancy bold/italic/script/fraktur" text generated
@@ -1046,16 +1086,15 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
     const pdf = pdfs[0]; // LinkedIn only supports 1 document per post
     const pdfBuffer = Buffer.from(pdf.base64Data.split(',')[1], 'base64');
 
-    const rawCaption = String(postData.caption || '');
+    const rawCaption = sanitizeCaption(String(postData.caption || ''));
     const { text: caption, normalized: captionWasNormalized } = normalizeMathUnicode(rawCaption);
 
     if (captionWasNormalized) {
-      console.warn('⚠️  LinkedIn PDF caption contained Mathematical Bold/Italic Unicode characters — automatically converted to plain text to prevent silent truncation by LinkedIn API.');
+      console.warn('⚠️  LinkedIn PDF caption contained Mathematical Unicode characters — automatically converted to plain text to prevent silent truncation by LinkedIn API.');
     }
 
-    console.log(`📝 LinkedIn doc post caption - JS length (UTF-16 units): ${caption.length}`);
-    console.log(`📝 LinkedIn doc post caption - UTF-8 bytes: ${Buffer.byteLength(caption, 'utf8')}`);
-    console.log(`📝 LinkedIn doc post caption - Full text: ${JSON.stringify(caption)}`);
+    console.log(`📝 LinkedIn PDF caption - chars: ${caption.length}, UTF-8 bytes: ${Buffer.byteLength(caption, 'utf8')}`);
+    console.log(`📝 LinkedIn PDF caption - full JSON: ${JSON.stringify(caption)}`);
 
     try {
       // Step 1: Initialize document upload
@@ -1163,7 +1202,7 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
       }
     }
 
-    const { text: multiImageCaption, normalized: multiImageCaptionNormalized } = normalizeMathUnicode(String(postData.caption || ''));
+    const { text: multiImageCaption, normalized: multiImageCaptionNormalized } = normalizeMathUnicode(sanitizeCaption(String(postData.caption || '')));
     if (multiImageCaptionNormalized) {
       console.warn('⚠️  LinkedIn multi-image caption contained Mathematical Unicode characters — automatically converted to plain text to prevent silent truncation by LinkedIn API.');
     }
@@ -1226,7 +1265,7 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
     recipe = isVideo ? 'urn:li:digitalmediaRecipe:feedshare-video' : 'urn:li:digitalmediaRecipe:feedshare-image';
   }
 
-  const { text: singlePostCaption, normalized: singlePostCaptionNormalized } = normalizeMathUnicode(String(postData.caption || ''));
+  const { text: singlePostCaption, normalized: singlePostCaptionNormalized } = normalizeMathUnicode(sanitizeCaption(String(postData.caption || '')));
   if (singlePostCaptionNormalized) {
     console.warn('⚠️  LinkedIn single post caption contained Mathematical Unicode characters — automatically converted to plain text to prevent silent truncation by LinkedIn API.');
   }
