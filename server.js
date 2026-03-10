@@ -2232,124 +2232,149 @@ app.get('/api/debug/tokens/:userId', async (req, res) => {
   }
 });
 
-// ============ CRON JOB FOR SCHEDULED POSTS ============
-cron.schedule('* * * * *', async () => {
-  // Runs every minute
-  try {
-    // Get current time in Lima, Peru timezone (UTC-5)
-    const now = new Date();
-    const limaTime = new Date(now.toLocaleString('en-US', { timeZone: 'America/Lima' }));
+// ============ SCHEDULER LOGIC (shared by cron + endpoint) ============
+async function runScheduler() {
+  // Get current time in Lima, Peru timezone (UTC-5)
+  const now = new Date();
+  const limaTime = new Date(now.toLocaleString('en-US', { timeZone: 'America/Lima' }));
 
-    // Direct query - ONLY get scheduled posts (no full DB load!)
-    const result = await pgDb.pool.query(
-      `SELECT * FROM posts
-       WHERE status = 'scheduled'
-       AND deleted_at IS NULL
-       ORDER BY schedule_date, schedule_time`
-    );
+  // Direct query - ONLY get scheduled posts (no full DB load!)
+  const result = await pgDb.pool.query(
+    `SELECT * FROM posts
+     WHERE status = 'scheduled'
+     AND deleted_at IS NULL
+     ORDER BY schedule_date, schedule_time`
+  );
 
-    for (const row of result.rows) {
-      const post = {
-        id: row.id,
-        userId: row.user_id,
-        caption: row.caption,
-        media: row.media,
-        mediaUrl: row.media_url,
-        platforms: {
-          facebook: row.platforms_facebook,
-          linkedin: row.platforms_linkedin
-        },
-        linkedInOrganizationId: row.linkedin_organization_id,
-        pdfTitle: row.pdf_title,
-        scheduleDate: row.schedule_date,
-        scheduleTime: row.schedule_time,
-        status: row.status,
-        approvalStatus: row.approval_status
-      };
+  let published = 0;
+  for (const row of result.rows) {
+    const post = {
+      id: row.id,
+      userId: row.user_id,
+      caption: row.caption,
+      media: row.media,
+      mediaUrl: row.media_url,
+      platforms: {
+        facebook: row.platforms_facebook,
+        linkedin: row.platforms_linkedin
+      },
+      linkedInOrganizationId: row.linkedin_organization_id,
+      pdfTitle: row.pdf_title,
+      scheduleDate: row.schedule_date,
+      scheduleTime: row.schedule_time,
+      status: row.status,
+      approvalStatus: row.approval_status
+    };
 
-      // Skip rejected posts - they should NEVER be published
-      if (post.approvalStatus?.approved === false) {
-        console.log(`⚠️ Skipping rejected post: ${post.id}`);
-        continue;
-      }
+    // Skip rejected posts - they should NEVER be published
+    if (post.approvalStatus?.approved === false) {
+      console.log(`⚠️ Skipping rejected post: ${post.id}`);
+      continue;
+    }
 
-      // If post went through approval workflow, ensure it was actually approved
-      if (post.approvalStatus && post.approvalStatus.approved !== true) {
-        console.log(`⚠️ Skipping non-approved post: ${post.id}`);
-        continue;
-      }
+    // If post went through approval workflow, ensure it was actually approved
+    if (post.approvalStatus && post.approvalStatus.approved !== true) {
+      console.log(`⚠️ Skipping non-approved post: ${post.id}`);
+      continue;
+    }
 
-      // Parse the scheduled time in Lima timezone
-      const scheduledDateTime = new Date(`${post.scheduleDate}T${post.scheduleTime}`);
+    // Parse the scheduled time in Lima timezone
+    const scheduledDateTime = new Date(`${post.scheduleDate}T${post.scheduleTime}`);
 
-      if (scheduledDateTime <= limaTime) {
-        console.log(`📅 Publishing scheduled post: ${post.id}`);
+    if (scheduledDateTime <= limaTime) {
+      console.log(`📅 Publishing scheduled post: ${post.id}`);
 
-        try {
-          // Load media items from post_media table
-          const mediaItems = await pgDb.getPostMedia(post.id);
-          console.log(`📎 Post ${post.id} has ${mediaItems.length} media items from DB:`, mediaItems.map(m => ({ type: m.type, url: m.url?.substring(0, 50) })));
+      try {
+        // Load media items from post_media table
+        const mediaItems = await pgDb.getPostMedia(post.id);
+        console.log(`📎 Post ${post.id} has ${mediaItems.length} media items from DB:`, mediaItems.map(m => ({ type: m.type, url: m.url?.substring(0, 50) })));
 
-          // Download media as base64 for social APIs
-          const mediaItemsWithBase64 = [];
-          for (const item of mediaItems) {
-            try {
-              const base64 = await storage.downloadMediaAsBase64(item.url);
-              mediaItemsWithBase64.push({ ...item, base64Data: base64 });
-            } catch (err) {
-              console.warn(`⚠️ Could not download media ${item.url}:`, err.message);
-            }
+        // Download media as base64 for social APIs
+        const mediaItemsWithBase64 = [];
+        for (const item of mediaItems) {
+          try {
+            const base64 = await storage.downloadMediaAsBase64(item.url);
+            mediaItemsWithBase64.push({ ...item, base64Data: base64 });
+          } catch (err) {
+            console.warn(`⚠️ Could not download media ${item.url}:`, err.message);
           }
-
-          // Also handle legacy single media
-          if (mediaItemsWithBase64.length === 0 && post.mediaUrl && !post.media) {
-            try {
-              post.media = await storage.downloadMediaAsBase64(post.mediaUrl);
-            } catch (err) {
-              console.warn(`⚠️ Could not download media for post ${post.id}:`, err.message);
-            }
-          }
-
-          // Add mediaItems to post object
-          post.mediaItems = mediaItemsWithBase64;
-          console.log(`📎 Post ${post.id} mediaItemsWithBase64:`, mediaItemsWithBase64.map(m => ({ type: m.type, hasBase64: !!m.base64Data })));
-
-          // For backwards compatibility, set single media from first item
-          if (mediaItemsWithBase64.length > 0 && !post.media) {
-            post.media = mediaItemsWithBase64[0].base64Data;
-          }
-
-          const results = {};
-
-          if (post.platforms.facebook) {
-            results.facebook = await postToFacebook(post.userId, post);
-          }
-
-          if (post.platforms.linkedin) {
-            results.linkedin = await postToLinkedIn(post.userId, post, post.linkedInOrganizationId);
-          }
-
-          // Update post status - ONLY this post
-          await pgDb.updatePost(post.id, {
-            status: 'published',
-            publishedAt: limaTime.toISOString(),
-            results: results
-          });
-
-          console.log(`✅ Successfully published post ${post.id}`);
-
-          // Send email notification to admins
-          await sendPostPublishedEmail(post, post.platforms);
-        } catch (error) {
-          console.error(`❌ Failed to publish post ${post.id}:`, error.message);
-          await pgDb.updatePost(post.id, {
-            status: 'failed'
-          });
         }
+
+        // Also handle legacy single media
+        if (mediaItemsWithBase64.length === 0 && post.mediaUrl && !post.media) {
+          try {
+            post.media = await storage.downloadMediaAsBase64(post.mediaUrl);
+          } catch (err) {
+            console.warn(`⚠️ Could not download media for post ${post.id}:`, err.message);
+          }
+        }
+
+        // Add mediaItems to post object
+        post.mediaItems = mediaItemsWithBase64;
+        console.log(`📎 Post ${post.id} mediaItemsWithBase64:`, mediaItemsWithBase64.map(m => ({ type: m.type, hasBase64: !!m.base64Data })));
+
+        // For backwards compatibility, set single media from first item
+        if (mediaItemsWithBase64.length > 0 && !post.media) {
+          post.media = mediaItemsWithBase64[0].base64Data;
+        }
+
+        const results = {};
+
+        if (post.platforms.facebook) {
+          results.facebook = await postToFacebook(post.userId, post);
+        }
+
+        if (post.platforms.linkedin) {
+          results.linkedin = await postToLinkedIn(post.userId, post, post.linkedInOrganizationId);
+        }
+
+        // Update post status - ONLY this post
+        await pgDb.updatePost(post.id, {
+          status: 'published',
+          publishedAt: limaTime.toISOString(),
+          results: results
+        });
+
+        console.log(`✅ Successfully published post ${post.id}`);
+        published++;
+
+        // Send email notification to admins
+        await sendPostPublishedEmail(post, post.platforms);
+      } catch (error) {
+        console.error(`❌ Failed to publish post ${post.id}:`, error.message);
+        await pgDb.updatePost(post.id, {
+          status: 'failed'
+        });
       }
     }
+  }
+  return published;
+}
+
+// ============ CRON JOB FOR SCHEDULED POSTS (backup) ============
+cron.schedule('* * * * *', async () => {
+  try {
+    await runScheduler();
   } catch (error) {
     console.error('❌ Cron job error:', error);
+  }
+});
+
+// ============ EXTERNAL CRON ENDPOINT ============
+// Hit this every minute from cron-job.org (or similar) to keep server alive
+// and guarantee posts publish on time even on Render free tier.
+// Set CRON_SECRET env var and use: GET /api/cron/run?secret=YOUR_SECRET
+app.get('/api/cron/run', async (req, res) => {
+  const secret = process.env.CRON_SECRET;
+  if (secret && req.query.secret !== secret) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  try {
+    const published = await runScheduler();
+    res.json({ ok: true, published });
+  } catch (error) {
+    console.error('❌ External cron error:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
