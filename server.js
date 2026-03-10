@@ -951,8 +951,71 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
     const pdf = pdfs[0]; // LinkedIn only supports 1 document per post
     const pdfBuffer = Buffer.from(pdf.base64Data.split(',')[1], 'base64');
 
-    // Log caption details to diagnose any truncation
-    const caption = String(postData.caption || '');
+    // Normalize Mathematical Alphanumeric Symbols (U+1D400–U+1D7FF) to plain ASCII.
+    // LinkedIn's /rest/posts API silently truncates document commentary at the first
+    // supplementary Unicode character in these ranges ("fancy bold/italic" text generated
+    // by third-party tools). We convert them to regular letters so the full text is published.
+    function normalizeMathUnicode(text) {
+      let normalized = false;
+      const result = Array.from(text).map(char => {
+        const cp = char.codePointAt(0);
+        if (cp < 0x1D400 || cp > 0x1D7FF) return char;
+        normalized = true;
+        // Capital letter ranges (each block is 26 contiguous code points, A–Z)
+        const capRanges = [
+          0x1D400, // Mathematical Bold
+          0x1D434, // Mathematical Italic
+          0x1D468, // Mathematical Bold Italic
+          0x1D4D0, // Mathematical Bold Script
+          0x1D56C, // Mathematical Bold Fraktur
+          0x1D5A0, // Mathematical Sans-Serif
+          0x1D5D4, // Mathematical Bold Sans-Serif
+          0x1D608, // Mathematical Sans-Serif Italic
+          0x1D63C, // Mathematical Sans-Serif Bold Italic
+          0x1D670, // Mathematical Monospace
+        ];
+        // Small letter ranges (a–z)
+        const smallRanges = [
+          0x1D41A, // Mathematical Bold
+          0x1D44E, // Mathematical Italic
+          0x1D482, // Mathematical Bold Italic
+          0x1D4EA, // Mathematical Bold Script
+          0x1D586, // Mathematical Bold Fraktur
+          0x1D5BA, // Mathematical Sans-Serif
+          0x1D5EE, // Mathematical Bold Sans-Serif
+          0x1D622, // Mathematical Sans-Serif Italic
+          0x1D656, // Mathematical Sans-Serif Bold Italic
+          0x1D68A, // Mathematical Monospace
+        ];
+        // Digit ranges (0–9)
+        const digitRanges = [
+          0x1D7CE, // Bold
+          0x1D7D8, // Double-Struck
+          0x1D7E2, // Sans-Serif
+          0x1D7EC, // Bold Sans-Serif
+          0x1D7F6, // Monospace
+        ];
+        for (const base of capRanges) {
+          if (cp >= base && cp < base + 26) return String.fromCharCode(0x41 + cp - base);
+        }
+        for (const base of smallRanges) {
+          if (cp >= base && cp < base + 26) return String.fromCharCode(0x61 + cp - base);
+        }
+        for (const base of digitRanges) {
+          if (cp >= base && cp < base + 10) return String.fromCharCode(0x30 + cp - base);
+        }
+        return char;
+      }).join('');
+      return { text: result, normalized };
+    }
+
+    const rawCaption = String(postData.caption || '');
+    const { text: caption, normalized: captionWasNormalized } = normalizeMathUnicode(rawCaption);
+
+    if (captionWasNormalized) {
+      console.warn('⚠️  LinkedIn PDF caption contained Mathematical Bold/Italic Unicode characters — automatically converted to plain text to prevent silent truncation by LinkedIn API.');
+    }
+
     console.log(`📝 LinkedIn doc post caption - JS length (UTF-16 units): ${caption.length}`);
     console.log(`📝 LinkedIn doc post caption - UTF-8 bytes: ${Buffer.byteLength(caption, 'utf8')}`);
     console.log(`📝 LinkedIn doc post caption - Full text: ${JSON.stringify(caption)}`);
@@ -1034,7 +1097,11 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
       console.log('✅ LinkedIn PDF response headers:', JSON.stringify(response.headers));
       // LinkedIn often returns empty body with 201, check headers for post ID
       const postId = response.headers['x-restli-id'] || response.headers['x-linkedin-id'] || response.data;
-      return { success: true, id: postId, status: response.status };
+      const result = { success: true, id: postId, status: response.status };
+      if (captionWasNormalized) {
+        result.warning = 'El texto contenía caracteres de "negrita unicode" que LinkedIn no soporta en publicaciones con PDF. Se publicó con texto normal para evitar que el contenido se recortara.';
+      }
+      return result;
     } catch (error) {
       console.error('❌ LinkedIn PDF upload error:', JSON.stringify(error.response?.data, null, 2) || error.message);
       console.error('❌ Full error details:', error.response?.status, error.response?.statusText);
