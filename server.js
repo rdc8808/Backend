@@ -945,69 +945,106 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
     return asset;
   }
 
+  // Normalize Mathematical Alphanumeric Symbols (U+1D400–U+1D7FF) to plain ASCII.
+  // LinkedIn's /rest/posts API silently truncates commentary at the first supplementary
+  // Unicode character in these ranges ("fancy bold/italic/script/fraktur" text generated
+  // by third-party tools). We convert them to regular letters so the full text is published.
+  // Applied to ALL post types (PDF, image, video) since all are affected.
+  function normalizeMathUnicode(text) {
+    let normalized = false;
+    // Non-contiguous Script/Fraktur/Double-Struck capital and lowercase mappings
+    // (these ranges have gaps where BMP chars are used instead, so can't use simple ranges)
+    const sparseMap = new Map([
+      // Mathematical Script capitals (non-bold) – gaps filled by BMP chars ℬℰℱℋℐℒℳℛ
+      [0x1D49C, 0x41], [0x1D49E, 0x43], [0x1D49F, 0x44], [0x1D4A2, 0x47],
+      [0x1D4A5, 0x4A], [0x1D4A6, 0x4B], [0x1D4A9, 0x4E], [0x1D4AA, 0x4F],
+      [0x1D4AB, 0x50], [0x1D4AC, 0x51], [0x1D4AE, 0x53], [0x1D4AF, 0x54],
+      [0x1D4B0, 0x55], [0x1D4B1, 0x56], [0x1D4B2, 0x57], [0x1D4B3, 0x58],
+      [0x1D4B4, 0x59], [0x1D4B5, 0x5A],
+      // Mathematical Script lowercase – gaps filled by BMP chars ℯℊℴ
+      [0x1D4B6, 0x61], [0x1D4B7, 0x62], [0x1D4B8, 0x63], [0x1D4B9, 0x64],
+      [0x1D4BB, 0x66], [0x1D4BD, 0x68], [0x1D4BE, 0x69], [0x1D4BF, 0x6A],
+      [0x1D4C0, 0x6B], [0x1D4C1, 0x6C], [0x1D4C2, 0x6D], [0x1D4C3, 0x6E],
+      [0x1D4C5, 0x70], [0x1D4C6, 0x71], [0x1D4C7, 0x72], [0x1D4C8, 0x73],
+      [0x1D4C9, 0x74], [0x1D4CA, 0x75], [0x1D4CB, 0x76], [0x1D4CC, 0x77],
+      [0x1D4CD, 0x78], [0x1D4CE, 0x79], [0x1D4CF, 0x7A],
+      // Mathematical Fraktur capitals – gaps filled by BMP chars ℭℌℑℜℨ
+      [0x1D504, 0x41], [0x1D505, 0x42], [0x1D507, 0x44], [0x1D508, 0x45],
+      [0x1D509, 0x46], [0x1D50A, 0x47], [0x1D50D, 0x4A], [0x1D50E, 0x4B],
+      [0x1D50F, 0x4C], [0x1D510, 0x4D], [0x1D511, 0x4E], [0x1D512, 0x4F],
+      [0x1D513, 0x50], [0x1D514, 0x51], [0x1D516, 0x53], [0x1D517, 0x54],
+      [0x1D518, 0x55], [0x1D519, 0x56], [0x1D51A, 0x57], [0x1D51B, 0x58],
+      [0x1D51C, 0x59],
+      // Mathematical Double-Struck capitals – gaps filled by BMP chars ℂℍℕℙℚℝℤ
+      [0x1D538, 0x41], [0x1D539, 0x42], [0x1D53B, 0x44], [0x1D53C, 0x45],
+      [0x1D53D, 0x46], [0x1D53E, 0x47], [0x1D540, 0x49], [0x1D541, 0x4A],
+      [0x1D542, 0x4B], [0x1D543, 0x4C], [0x1D544, 0x4D], [0x1D546, 0x4F],
+      [0x1D54A, 0x53], [0x1D54B, 0x54], [0x1D54C, 0x55], [0x1D54D, 0x56],
+      [0x1D54E, 0x57], [0x1D54F, 0x58], [0x1D550, 0x59],
+    ]);
+    const result = Array.from(text).map(char => {
+      const cp = char.codePointAt(0);
+      if (cp < 0x1D400 || cp > 0x1D7FF) return char;
+      normalized = true;
+      // Check sparse map first (Script/Fraktur/Double-Struck with gaps)
+      if (sparseMap.has(cp)) return String.fromCharCode(sparseMap.get(cp));
+      // Capital letter ranges (each block is 26 contiguous code points, A–Z)
+      const capRanges = [
+        0x1D400, // Mathematical Bold
+        0x1D434, // Mathematical Italic
+        0x1D468, // Mathematical Bold Italic
+        0x1D4D0, // Mathematical Bold Script
+        0x1D56C, // Mathematical Bold Fraktur
+        0x1D5A0, // Mathematical Sans-Serif
+        0x1D5D4, // Mathematical Bold Sans-Serif
+        0x1D608, // Mathematical Sans-Serif Italic
+        0x1D63C, // Mathematical Sans-Serif Bold Italic
+        0x1D670, // Mathematical Monospace
+      ];
+      // Small letter ranges (a–z)
+      const smallRanges = [
+        0x1D41A, // Mathematical Bold
+        0x1D44E, // Mathematical Italic
+        0x1D482, // Mathematical Bold Italic
+        0x1D4EA, // Mathematical Bold Script
+        0x1D51E, // Mathematical Fraktur
+        0x1D552, // Mathematical Double-Struck
+        0x1D586, // Mathematical Bold Fraktur
+        0x1D5BA, // Mathematical Sans-Serif
+        0x1D5EE, // Mathematical Bold Sans-Serif
+        0x1D622, // Mathematical Sans-Serif Italic
+        0x1D656, // Mathematical Sans-Serif Bold Italic
+        0x1D68A, // Mathematical Monospace
+      ];
+      // Digit ranges (0–9)
+      const digitRanges = [
+        0x1D7CE, // Bold
+        0x1D7D8, // Double-Struck
+        0x1D7E2, // Sans-Serif
+        0x1D7EC, // Bold Sans-Serif
+        0x1D7F6, // Monospace
+      ];
+      for (const base of capRanges) {
+        if (cp >= base && cp < base + 26) return String.fromCharCode(0x41 + cp - base);
+      }
+      for (const base of smallRanges) {
+        if (cp >= base && cp < base + 26) return String.fromCharCode(0x61 + cp - base);
+      }
+      for (const base of digitRanges) {
+        if (cp >= base && cp < base + 10) return String.fromCharCode(0x30 + cp - base);
+      }
+      // Any remaining supplementary math char in U+1D400–U+1D7FF that we couldn't map
+      // (e.g. math symbols, operators) — strip it rather than let LinkedIn truncate the post.
+      return '';
+    }).join('');
+    return { text: result, normalized };
+  }
+
   // PDF DOCUMENT POST (takes priority - LinkedIn documents are special)
   if (pdfs.length > 0) {
     console.log(`📄 Uploading PDF document to LinkedIn`);
     const pdf = pdfs[0]; // LinkedIn only supports 1 document per post
     const pdfBuffer = Buffer.from(pdf.base64Data.split(',')[1], 'base64');
-
-    // Normalize Mathematical Alphanumeric Symbols (U+1D400–U+1D7FF) to plain ASCII.
-    // LinkedIn's /rest/posts API silently truncates document commentary at the first
-    // supplementary Unicode character in these ranges ("fancy bold/italic" text generated
-    // by third-party tools). We convert them to regular letters so the full text is published.
-    function normalizeMathUnicode(text) {
-      let normalized = false;
-      const result = Array.from(text).map(char => {
-        const cp = char.codePointAt(0);
-        if (cp < 0x1D400 || cp > 0x1D7FF) return char;
-        normalized = true;
-        // Capital letter ranges (each block is 26 contiguous code points, A–Z)
-        const capRanges = [
-          0x1D400, // Mathematical Bold
-          0x1D434, // Mathematical Italic
-          0x1D468, // Mathematical Bold Italic
-          0x1D4D0, // Mathematical Bold Script
-          0x1D56C, // Mathematical Bold Fraktur
-          0x1D5A0, // Mathematical Sans-Serif
-          0x1D5D4, // Mathematical Bold Sans-Serif
-          0x1D608, // Mathematical Sans-Serif Italic
-          0x1D63C, // Mathematical Sans-Serif Bold Italic
-          0x1D670, // Mathematical Monospace
-        ];
-        // Small letter ranges (a–z)
-        const smallRanges = [
-          0x1D41A, // Mathematical Bold
-          0x1D44E, // Mathematical Italic
-          0x1D482, // Mathematical Bold Italic
-          0x1D4EA, // Mathematical Bold Script
-          0x1D586, // Mathematical Bold Fraktur
-          0x1D5BA, // Mathematical Sans-Serif
-          0x1D5EE, // Mathematical Bold Sans-Serif
-          0x1D622, // Mathematical Sans-Serif Italic
-          0x1D656, // Mathematical Sans-Serif Bold Italic
-          0x1D68A, // Mathematical Monospace
-        ];
-        // Digit ranges (0–9)
-        const digitRanges = [
-          0x1D7CE, // Bold
-          0x1D7D8, // Double-Struck
-          0x1D7E2, // Sans-Serif
-          0x1D7EC, // Bold Sans-Serif
-          0x1D7F6, // Monospace
-        ];
-        for (const base of capRanges) {
-          if (cp >= base && cp < base + 26) return String.fromCharCode(0x41 + cp - base);
-        }
-        for (const base of smallRanges) {
-          if (cp >= base && cp < base + 26) return String.fromCharCode(0x61 + cp - base);
-        }
-        for (const base of digitRanges) {
-          if (cp >= base && cp < base + 10) return String.fromCharCode(0x30 + cp - base);
-        }
-        return char;
-      }).join('');
-      return { text: result, normalized };
-    }
 
     const rawCaption = String(postData.caption || '');
     const { text: caption, normalized: captionWasNormalized } = normalizeMathUnicode(rawCaption);
@@ -1126,13 +1163,18 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
       }
     }
 
+    const { text: multiImageCaption, normalized: multiImageCaptionNormalized } = normalizeMathUnicode(String(postData.caption || ''));
+    if (multiImageCaptionNormalized) {
+      console.warn('⚠️  LinkedIn multi-image caption contained Mathematical Unicode characters — automatically converted to plain text to prevent silent truncation by LinkedIn API.');
+    }
+
     const multiImagePostBody = {
       author: organizationURN,
       lifecycleState: 'PUBLISHED',
       specificContent: {
         'com.linkedin.ugc.ShareContent': {
           shareCommentary: {
-            text: postData.caption
+            text: multiImageCaption
           },
           shareMediaCategory: 'IMAGE',
           media: uploadedAssets
@@ -1184,13 +1226,18 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
     recipe = isVideo ? 'urn:li:digitalmediaRecipe:feedshare-video' : 'urn:li:digitalmediaRecipe:feedshare-image';
   }
 
+  const { text: singlePostCaption, normalized: singlePostCaptionNormalized } = normalizeMathUnicode(String(postData.caption || ''));
+  if (singlePostCaptionNormalized) {
+    console.warn('⚠️  LinkedIn single post caption contained Mathematical Unicode characters — automatically converted to plain text to prevent silent truncation by LinkedIn API.');
+  }
+
   const postBody = {
     author: organizationURN,
     lifecycleState: 'PUBLISHED',
     specificContent: {
       'com.linkedin.ugc.ShareContent': {
         shareCommentary: {
-          text: postData.caption
+          text: singlePostCaption
         },
         shareMediaCategory: mediaCategory
       }
