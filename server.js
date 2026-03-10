@@ -957,6 +957,19 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
     console.log(`📝 LinkedIn doc post caption - UTF-8 bytes: ${Buffer.byteLength(caption, 'utf8')}`);
     console.log(`📝 LinkedIn doc post caption - Full text: ${JSON.stringify(caption)}`);
 
+    // Detect Unicode Mathematical Alphanumeric Symbols (U+1D400–U+1D7FF) and similar
+    // fancy-text characters. LinkedIn's API silently truncates commentary at the first
+    // occurrence of these characters, causing posts to be published with cut-off text.
+    const hasFancyUnicode = /[\u{1D400}-\u{1D7FF}]/u.test(caption);
+    if (hasFancyUnicode) {
+      console.warn('⚠️  LinkedIn PDF caption contains Mathematical Bold/Italic Unicode characters that LinkedIn API cannot handle — these will cause silent text truncation.');
+      throw new Error(
+        'El texto contiene caracteres especiales de formato ("negrita unicode" como 𝗮𝗯𝗰 o 𝘢𝘣𝘤). ' +
+        'LinkedIn no puede procesar estos caracteres en publicaciones con PDF y trunca el texto silenciosamente. ' +
+        'Por favor reemplaza esas letras con texto normal antes de publicar.'
+      );
+    }
+
     try {
       // Step 1: Initialize document upload
       const initResponse = await axios.post(
