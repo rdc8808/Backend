@@ -19,6 +19,7 @@ const storage = require('./storage');
 const healthCheck = require('./health-check');
 
 const app = express();
+app.set('trust proxy', 1); // Render runs behind a reverse proxy
 const PORT = process.env.PORT || 3000;
 
 // Rate limiting - prevent abuse (10 requests per minute per IP)
@@ -645,6 +646,10 @@ app.get('/auth/callback', async (req, res) => {
       );
 
       const accessToken = tokenResponse.data.access_token;
+      const expiresIn = tokenResponse.data.expires_in; // seconds (~5183999 = 60 days)
+      const expiresAt = expiresIn
+        ? new Date(Date.now() + expiresIn * 1000).toISOString()
+        : null;
 
       // Get user profile using OpenID Connect
       const profileResponse = await axios.get(`https://api.linkedin.com/v2/userinfo`, {
@@ -689,6 +694,8 @@ app.get('/auth/callback', async (req, res) => {
       // Save tokens at APP-LEVEL (shared by all users)
       await pgDb.saveTokens('app', 'linkedin', {
         accessToken: accessToken,
+        expiresIn: expiresIn,
+        expiresAt: expiresAt,
         profile: profileResponse.data,
         organizations: organizations,
         connectedAt: new Date().toISOString(),
@@ -870,6 +877,19 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
   const liToken = appTokens.linkedin;
 
   if (!liToken) throw new Error('LinkedIn no está conectado');
+
+  // Check token expiry before making any API calls
+  if (liToken.expiresAt) {
+    const expiresAt = new Date(liToken.expiresAt);
+    const now = new Date();
+    if (now >= expiresAt) {
+      throw new Error('El token de LinkedIn ha expirado. Por favor reconecta LinkedIn desde la configuración.');
+    }
+    const daysLeft = Math.floor((expiresAt - now) / (1000 * 60 * 60 * 24));
+    if (daysLeft <= 7) {
+      console.warn(`⚠️ LinkedIn token expires in ${daysLeft} day(s) (${liToken.expiresAt}). Reconnect soon.`);
+    }
+  }
 
   // Find specific organization or use first as fallback
   let organization;
@@ -1318,9 +1338,21 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
     console.log('✅ LinkedIn post successful:', response.data);
     return response.data;
   } catch (error) {
-    console.error('❌ LinkedIn posting error:', error.response?.data || error.message);
-    console.error('❌ Full error:', JSON.stringify(error.response?.data, null, 2));
-    throw new Error(`LinkedIn posting failed: ${error.response?.data?.message || error.message}`);
+    const liError = error.response?.data;
+    const isExpired =
+      error.response?.status === 401 ||
+      liError?.status === 401 ||
+      (liError?.message || '').toLowerCase().includes('expired') ||
+      (liError?.message || '').toLowerCase().includes('revoked');
+
+    if (isExpired) {
+      console.error('❌ LinkedIn token expired or revoked:', liError);
+      throw new Error('El token de LinkedIn ha expirado. Por favor reconecta LinkedIn desde la configuración.');
+    }
+
+    console.error('❌ LinkedIn posting error:', liError || error.message);
+    console.error('❌ Full error:', JSON.stringify(liError, null, 2));
+    throw new Error(`LinkedIn posting failed: ${liError?.message || error.message}`);
   }
 }
 
