@@ -998,11 +998,14 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
       throw new Error(`Organización LinkedIn no encontrada: ${organizationId}`);
     }
   } else {
-    // Fallback to first organization if none specified
     if (!liToken.organizations || liToken.organizations.length === 0) {
       throw new Error('No se encontraron páginas de LinkedIn. Por favor, reconecta tu cuenta de LinkedIn.');
     }
-    organization = liToken.organizations[0];
+    // Use admin-configured default org, otherwise first in list
+    const defaultId = liToken.defaultOrganizationId;
+    organization = defaultId
+      ? (liToken.organizations.find(o => o.id === defaultId) || liToken.organizations[0])
+      : liToken.organizations[0];
   }
 
   const organizationURN = `urn:li:organization:${organization.id}`;
@@ -2310,10 +2313,33 @@ app.get('/api/connections', async (req, res) => {
       facebook: !!appTokens.facebook,
       linkedin: !!appTokens.linkedin,
       linkedinOrganizations: appTokens.linkedin?.organizations || [],
+      linkedinDefaultOrg: appTokens.linkedin?.defaultOrganizationId || null,
       instagram: false
     });
   } catch (error) {
     console.error('Get connections error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Set default LinkedIn organization (admin only)
+app.put('/api/linkedin/default-org', async (req, res) => {
+  try {
+    const { organizationId } = req.body;
+    if (!organizationId) return res.status(400).json({ error: 'organizationId required' });
+
+    const appTokens = await pgDb.getTokens('app');
+    const liToken = appTokens.linkedin;
+    if (!liToken) return res.status(400).json({ error: 'LinkedIn not connected' });
+
+    const org = liToken.organizations.find(o => o.id === String(organizationId));
+    if (!org) return res.status(404).json({ error: 'Organization not found', available: liToken.organizations });
+
+    await pgDb.saveTokens('app', 'linkedin', { ...liToken, defaultOrganizationId: String(organizationId) });
+    console.log(`✅ LinkedIn default org set to: ${org.name} (${organizationId})`);
+    res.json({ ok: true, defaultOrg: org });
+  } catch (error) {
+    console.error('Set default org error:', error);
     res.status(500).json({ error: error.message });
   }
 });
