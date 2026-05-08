@@ -587,7 +587,7 @@ app.get('/auth/linkedin', (req, res) => {
     `response_type=code` +
     `&client_id=${CONFIG.LINKEDIN_CLIENT_ID}` +
     `&redirect_uri=${encodeURIComponent(CONFIG.REDIRECT_URI)}` +
-    `&scope=openid,profile,email,w_member_social,w_organization_social,r_organization_social,r_organization_admin` +
+    `&scope=openid,profile,email,w_member_social,w_organization_social,r_organization_social,r_organization_admin,offline_access` +
     `&state=linkedin_${userId}`;
 
   res.redirect(authUrl);
@@ -650,6 +650,11 @@ app.get('/auth/callback', async (req, res) => {
       const expiresAt = expiresIn
         ? new Date(Date.now() + expiresIn * 1000).toISOString()
         : null;
+      const refreshToken = tokenResponse.data.refresh_token || null;
+      const refreshTokenExpiresIn = tokenResponse.data.refresh_token_expires_in || null; // ~31536000 = 365 days
+      const refreshTokenExpiresAt = refreshTokenExpiresIn
+        ? new Date(Date.now() + refreshTokenExpiresIn * 1000).toISOString()
+        : null;
 
       // Get user profile using OpenID Connect
       const profileResponse = await axios.get(`https://api.linkedin.com/v2/userinfo`, {
@@ -696,6 +701,8 @@ app.get('/auth/callback', async (req, res) => {
         accessToken: accessToken,
         expiresIn: expiresIn,
         expiresAt: expiresAt,
+        refreshToken: refreshToken,
+        refreshTokenExpiresAt: refreshTokenExpiresAt,
         profile: profileResponse.data,
         organizations: organizations,
         connectedAt: new Date().toISOString(),
@@ -870,24 +877,116 @@ async function postToFacebook(userId, postData) {
   }
 }
 
+// ============ LINKEDIN TOKEN HELPERS ============
+
+async function sendLinkedInReconnectAlert() {
+  try {
+    const users = await pgDb.getUsers();
+    const admins = Object.values(users).filter(u => u.role === 'admin');
+    if (admins.length === 0) {
+      console.warn('⚠️ No admin users found to notify about LinkedIn reconnect');
+      return;
+    }
+    for (const admin of admins) {
+      await resend.emails.send({
+        from: FROM_EMAIL,
+        to: admin.email,
+        subject: '⚠️ LinkedIn necesita reconexión - CBC Social Planner',
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h1 style="color: #cc0000;">⚠️ Acción requerida: Reconecta LinkedIn</h1>
+            <p>Hola <strong>${admin.fullName}</strong>,</p>
+            <p>La autorización de LinkedIn de CBC Social Planner ha expirado. Las publicaciones programadas en LinkedIn <strong>no se publicarán</strong> hasta que reconectes la cuenta.</p>
+            <div style="background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0; border-radius: 4px;">
+              <p style="margin: 0;"><strong>Acción:</strong> Entra a la configuración de la plataforma y reconecta LinkedIn. Solo toma 30 segundos.</p>
+            </div>
+            <p>
+              <a href="${CONFIG.CLIENT_URL}/settings"
+                 style="background: #0077b5; color: white; padding: 12px 24px; border-radius: 4px; text-decoration: none; display: inline-block;">
+                Reconectar LinkedIn
+              </a>
+            </p>
+            <p style="color: #666; font-size: 12px; margin-top: 30px;">
+              Aviso automático de CBC Social Planner.
+            </p>
+          </div>
+        `
+      });
+      console.log(`📧 LinkedIn reconnect alert sent to admin ${admin.email}`);
+    }
+  } catch (err) {
+    console.error('❌ Failed to send LinkedIn reconnect alert email:', err.message);
+  }
+}
+
+async function refreshLinkedInToken() {
+  const appTokens = await pgDb.getTokens('app');
+  const liToken = appTokens.linkedin;
+
+  if (!liToken?.refreshToken) {
+    await sendLinkedInReconnectAlert();
+    throw new Error('LinkedIn necesita reconexión. El administrador ha sido notificado.');
+  }
+
+  if (liToken.refreshTokenExpiresAt && new Date() >= new Date(liToken.refreshTokenExpiresAt)) {
+    console.error('❌ LinkedIn refresh token expired at', liToken.refreshTokenExpiresAt);
+    await sendLinkedInReconnectAlert();
+    throw new Error('LinkedIn necesita reconexión. El administrador ha sido notificado.');
+  }
+
+  const tokenResponse = await axios.post('https://www.linkedin.com/oauth/v2/accessToken',
+    new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: liToken.refreshToken,
+      client_id: CONFIG.LINKEDIN_CLIENT_ID,
+      client_secret: CONFIG.LINKEDIN_CLIENT_SECRET
+    }), {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+    }
+  );
+
+  const newAccessToken = tokenResponse.data.access_token;
+  const newExpiresIn = tokenResponse.data.expires_in;
+  const newExpiresAt = newExpiresIn
+    ? new Date(Date.now() + newExpiresIn * 1000).toISOString()
+    : null;
+
+  // LinkedIn may rotate the refresh token too
+  const newRefreshToken = tokenResponse.data.refresh_token || liToken.refreshToken;
+  const newRefreshTokenExpiresIn = tokenResponse.data.refresh_token_expires_in;
+  const newRefreshTokenExpiresAt = newRefreshTokenExpiresIn
+    ? new Date(Date.now() + newRefreshTokenExpiresIn * 1000).toISOString()
+    : liToken.refreshTokenExpiresAt;
+
+  await pgDb.saveTokens('app', 'linkedin', {
+    ...liToken,
+    accessToken: newAccessToken,
+    expiresIn: newExpiresIn,
+    expiresAt: newExpiresAt,
+    refreshToken: newRefreshToken,
+    refreshTokenExpiresAt: newRefreshTokenExpiresAt,
+  });
+
+  console.log('✅ LinkedIn access token refreshed silently. New expiry:', newExpiresAt);
+  return newAccessToken;
+}
+
 // ============ POST TO LINKEDIN ============
 async function postToLinkedIn(userId, postData, organizationId = null) {
   // Use APP-LEVEL tokens (shared by all users)
   const appTokens = await pgDb.getTokens('app');
-  const liToken = appTokens.linkedin;
+  let liToken = appTokens.linkedin;
 
   if (!liToken) throw new Error('LinkedIn no está conectado');
 
-  // Check token expiry before making any API calls
+  // Auto-refresh if token is expired or expiring within 24 hours
   if (liToken.expiresAt) {
-    const expiresAt = new Date(liToken.expiresAt);
-    const now = new Date();
-    if (now >= expiresAt) {
-      throw new Error('El token de LinkedIn ha expirado. Por favor reconecta LinkedIn desde la configuración.');
-    }
-    const daysLeft = Math.floor((expiresAt - now) / (1000 * 60 * 60 * 24));
-    if (daysLeft <= 7) {
-      console.warn(`⚠️ LinkedIn token expires in ${daysLeft} day(s) (${liToken.expiresAt}). Reconnect soon.`);
+    const refreshThreshold = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    if (new Date(liToken.expiresAt) <= refreshThreshold) {
+      console.log('🔄 LinkedIn access token expired or expiring within 24h — refreshing silently...');
+      await refreshLinkedInToken();
+      const refreshed = await pgDb.getTokens('app');
+      liToken = refreshed.linkedin;
     }
   }
 
@@ -1338,16 +1437,26 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
     console.log('✅ LinkedIn post successful:', response.data);
     return response.data;
   } catch (error) {
+    // Re-throw errors we already generated (refresh failed, not connected, etc.)
+    if (!error.response) throw error;
+
     const liError = error.response?.data;
-    const isExpired =
+    const isAuthError =
       error.response?.status === 401 ||
       liError?.status === 401 ||
       (liError?.message || '').toLowerCase().includes('expired') ||
       (liError?.message || '').toLowerCase().includes('revoked');
 
-    if (isExpired) {
-      console.error('❌ LinkedIn token expired or revoked:', liError);
-      throw new Error('El token de LinkedIn ha expirado. Por favor reconecta LinkedIn desde la configuración.');
+    if (isAuthError) {
+      console.error('❌ LinkedIn auth error during post — attempting token refresh:', liError);
+      try {
+        await refreshLinkedInToken();
+        console.warn('⚠️ Token refreshed but current post already failed. Retry will succeed.');
+      } catch (refreshErr) {
+        // refreshLinkedInToken already sent the admin alert
+        console.error('❌ LinkedIn token refresh also failed:', refreshErr.message);
+      }
+      throw new Error('LinkedIn necesita reconexión. El administrador ha sido notificado.');
     }
 
     console.error('❌ LinkedIn posting error:', liError || error.message);
