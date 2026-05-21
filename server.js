@@ -1074,13 +1074,36 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
     let issues = [];
     let result = text;
 
-    // 1. Normalize Windows/old-Mac line endings → Unix \n
+    // 1. Normalize Windows/old-Mac line endings
     if (/\r/.test(result)) {
       issues.push('\\r (carriage return)');
       result = result.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
     }
-    // 2. Strip invisible formatting/directional characters
-    const invisibleChars = [
+
+    // 2. Replace non-standard spaces with regular space.
+    // \u00A0 (non-breaking space) is the #1 cause of silent LinkedIn truncation
+    // when clients copy-paste from Google Docs or Word.
+    const replaceWithSpace = [
+      ['\u00A0', 'U+00A0 non-breaking space'],
+      ['\u202F', 'U+202F narrow no-break space'],
+      ['\u2007', 'U+2007 figure space'],
+      ['\u2060', 'U+2060 word joiner'],
+    ];
+    for (const [char, label] of replaceWithSpace) {
+      if (result.includes(char)) {
+        issues.push(label);
+        result = result.split(char).join(' ');
+      }
+    }
+
+    // 3. Replace Unicode general spaces U+2000-U+200A with regular space
+    if (/[\u2000-\u200A]/.test(result)) {
+      issues.push('U+2000-U+200A Unicode spaces');
+      result = result.replace(/[\u2000-\u200A]/g, ' ');
+    }
+
+    // 4. Strip invisible formatting / directional / control characters
+    const stripChars = [
       ['\u200B', 'U+200B zero-width space'],
       ['\u200C', 'U+200C zero-width non-joiner'],
       ['\u200D', 'U+200D zero-width joiner'],
@@ -1088,21 +1111,34 @@ async function postToLinkedIn(userId, postData, organizationId = null) {
       ['\u200E', 'U+200E left-to-right mark'],
       ['\u200F', 'U+200F right-to-left mark'],
       ['\u00AD', 'U+00AD soft hyphen'],
+      ['\u2061', 'U+2061 function application'],
+      ['\u2062', 'U+2062 invisible times'],
+      ['\u2063', 'U+2063 invisible separator'],
+      ['\u2064', 'U+2064 invisible plus'],
+      ['\uFE0E', 'U+FE0E variation selector-15'],
+      ['\uFE0F', 'U+FE0F variation selector-16'],
     ];
-    for (const [char, label] of invisibleChars) {
+    for (const [char, label] of stripChars) {
       if (result.includes(char)) {
         issues.push(label);
         result = result.split(char).join('');
       }
     }
-    // 3. Unicode line/paragraph separators → \n
+
+    // 5. Unicode line/paragraph separators
     if (/[\u2028\u2029]/.test(result)) {
       issues.push('U+2028/U+2029 line/paragraph separator');
       result = result.replace(/[\u2028\u2029]/g, '\n');
     }
 
+    // 6. Strip ASCII control characters (except \n and \t)
+    if (/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/.test(result)) {
+      issues.push('ASCII control characters');
+      result = result.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+    }
+
     if (issues.length > 0) {
-      console.warn(`⚠️  LinkedIn caption contained invisible characters that were cleaned: ${issues.join(', ')}`);
+      console.warn(`⚠️  LinkedIn caption sanitized — removed: ${issues.join(', ')}`);
     }
     return result;
   }
