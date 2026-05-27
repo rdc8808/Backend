@@ -2762,6 +2762,11 @@ pgDb.initDB().then(() => {
     console.log(`🔵 Facebook OAuth: http://localhost:${PORT}/auth/facebook`);
     console.log(`🔵 LinkedIn OAuth: http://localhost:${PORT}/auth/linkedin`);
 
+    // Run scheduler immediately on startup to catch any posts missed during downtime/redeploy
+    setTimeout(() => {
+      runScheduler().catch(err => console.error('❌ Startup scheduler run failed:', err));
+    }, 5000);
+
     // Start health monitoring
     healthCheck.startHealthMonitoring();
     const initialStats = healthCheck.getHealthStats();
