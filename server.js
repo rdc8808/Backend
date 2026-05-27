@@ -2154,12 +2154,21 @@ app.post('/api/post-now', async (req, res) => {
     // New format: mediaItems array
     if (postData.mediaItems && postData.mediaItems.length > 0) {
       try {
-        uploadedMediaItems = await storage.uploadMultipleMedia(postData.mediaItems, userId);
-        uploadedMediaItems = uploadedMediaItems.filter(item => item.url);
-        console.log(`✅ ${uploadedMediaItems.length} media files uploaded for post-now ${postId}`);
+        // Items with base64Data need uploading; items that already have a url
+        // (e.g. previously saved/approved posts) skip re-upload entirely.
+        const needsUpload = postData.mediaItems.filter(item => item.base64Data && !item.url);
+        const alreadyUploaded = postData.mediaItems.filter(item => item.url);
+
+        if (needsUpload.length > 0) {
+          const newUploads = await storage.uploadMultipleMedia(needsUpload, userId);
+          uploadedMediaItems.push(...newUploads.filter(r => r.url));
+        }
+        uploadedMediaItems.push(...alreadyUploaded);
+
         if (uploadedMediaItems.length > 0) {
           mediaUrl = uploadedMediaItems[0].url;
         }
+        console.log(`✅ ${uploadedMediaItems.length} media files ready for post-now ${postId}`);
       } catch (uploadError) {
         console.error('❌ Media upload failed:', uploadError);
         return res.status(500).json({ error: 'Error al subir los archivos' });
@@ -2191,6 +2200,12 @@ app.post('/api/post-now', async (req, res) => {
       } catch (err) {
         console.warn(`⚠️ Could not download media ${item.url}:`, err.message);
       }
+    }
+
+    // If media was expected but all downloads failed, abort rather than posting without it
+    if (uploadedMediaItems.length > 0 && mediaItemsWithBase64.length === 0) {
+      console.error('❌ All media downloads failed — aborting post to avoid publishing without media');
+      return res.status(500).json({ error: 'No se pudo procesar el archivo multimedia. Intenta de nuevo.' });
     }
 
     // For backwards compatibility, also set single media
